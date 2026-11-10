@@ -256,6 +256,6 @@ describe.skipIf(!url)("tenancy routes (Postgres)", () => {
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).not.toMatch(/A shop|B shop|ra@test|name/);
-    expect(Object.keys(JSON.parse(text).stats).sort()).toEqual(["aiCallsToday", "aiDailyCap", "memberships", "openInvites", "users", "workspaces"]);
+    expect(Object.keys(JSON.parse(text).stats).sort()).toEqual(["aiCallsToday", "aiDailyCap", "items", "memberships", "movementsToday", "openInvites", "users", "workspaces"]);
   });
 });

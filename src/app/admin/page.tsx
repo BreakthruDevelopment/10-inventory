@@ -46,6 +46,8 @@ export default async function AdminPage() {
       <PageIntro section="Admin" title="Overview" description="Counts only: admins never see workspace names, items or stock." />
       <StatGrid>
         <StatTile value={stats.workspaces} label="Workspaces" tone="accent" />
+        <StatTile value={stats.items} label="Items" />
+        <StatTile value={stats.movementsToday} label="Movements today (UTC)" />
         <StatTile value={stats.memberships} label="Memberships" />
         <StatTile value={stats.openInvites} label="Open invites" />
         <StatTile value={`${stats.aiCallsToday} / ${stats.aiDailyCap}`} label="AI calls today" />

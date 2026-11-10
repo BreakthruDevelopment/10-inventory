@@ -1,14 +1,18 @@
 import { ZodError } from "zod";
 import { AiError } from "@/lib/ai/types";
 import { ForbiddenError, UnauthorizedError } from "@/lib/auth/rbac";
-import { BadRequestError, HttpError, PayloadTooLargeError } from "@/lib/errors";
+import { BadRequestError, ClientOpReusedError, HttpError, PayloadTooLargeError, StockConflictError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { safeErrorFields } from "@/lib/safe-error";
 
-export type ErrorInfo = { status: number; body: { error: string; issues?: unknown } };
+export type ErrorInfo = { status: number; body: { error: string; issues?: unknown; current?: unknown; movements?: unknown; truncated?: boolean; code?: string } };
 
 /** Map known errors to a status and a client-safe body; never leak stack traces or internals. */
 export function errorInfo(err: unknown): ErrorInfo {
+  if (err instanceof StockConflictError) {
+    return { status: 409, body: { error: err.message, current: err.current, movements: err.movements, truncated: err.truncated } };
+  }
+  if (err instanceof ClientOpReusedError) return { status: 409, body: { error: err.message, code: err.code } };
   if (err instanceof UnauthorizedError || err instanceof ForbiddenError || err instanceof HttpError) {
     return { status: err.status, body: { error: err.message } };
   }
