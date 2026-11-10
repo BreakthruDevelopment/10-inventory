@@ -52,5 +52,11 @@ export class UnprocessableError extends HttpError {
 
 /** Client-safe inventory conflict: callers may show this state before explicitly resubmitting. */
 export class StockConflictError extends ConflictError {
-  constructor(message: string, readonly current: Item, readonly movements: (Omit<StockMovement, "id"> & { id: string })[]) { super(message); }
+  constructor(message: string, readonly current: Item, readonly movements: (Omit<StockMovement, "id"> & { id: string })[], readonly truncated = false) { super(message); }
+}
+
+/** A client operation id was replayed with a different item, kind or quantity. */
+export class ClientOpReusedError extends ConflictError {
+  readonly code = "client_op_reused";
+  constructor() { super("That operation id was already used for a different stock movement."); }
 }

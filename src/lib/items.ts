@@ -9,6 +9,7 @@ import { requireMember } from "@/lib/tenancy";
 import { advisoryLock, consumeRate, type Tx } from "@/lib/usage";
 
 const { item, stockMovement } = schema;
+const CONFLICT_MOVEMENTS = 50;
 const int = (min: number, max = 2147483647) => z.number().int().min(min).max(max);
 const fields = {
   sku: z.string().trim().min(1).max(40), name: z.string().trim().min(1).max(120),
@@ -23,7 +24,7 @@ export const editItemInput = z.object({
   unit: z.enum(ITEM_UNITS).optional(), reorderPoint: int(0, 100000).optional(),
   leadTimeDays: int(0, 90).optional(), packSize: int(1, 10000).optional(),
   supplierName: z.string().trim().max(120).optional(), unitCostCents: int(0).optional(), version: int(1),
-}).strict();
+}).strict().refine(d => Object.entries(d).some(([k, v]) => k !== "version" && v !== undefined), "Send at least one field to change.");
 export const archiveItemInput = z.object({ version: int(1) }).strict();
 export const listItemsInput = z.object({ q: z.string().trim().max(120).default(""), archived: z.enum(["true", "false"]).default("false") }).strict();
 
@@ -39,13 +40,27 @@ export const itemScope = (workspaceId: string, itemId: string) => and(eq(item.wo
 export async function stockConflict(tx: Tx, workspaceId: string, itemId: string, sinceVersion = 0, delta?: number): Promise<never> {
   const [current] = await tx.select().from(item).where(itemScope(workspaceId, itemId)).for("share");
   if (!current) throw new NotFoundError();
-  const movements = await tx.select().from(stockMovement).where(and(
+  // Only the newest page: an item can have thousands of movements and the body goes to the client.
+  const newest = await tx.select().from(stockMovement).where(and(
     eq(stockMovement.workspaceId, workspaceId), eq(stockMovement.itemId, itemId), gt(stockMovement.itemVersion, sinceVersion),
-  )).orderBy(stockMovement.itemVersion, stockMovement.id);
+  )).orderBy(desc(stockMovement.itemVersion)).limit(CONFLICT_MOVEMENTS + 1);
+  const truncated = newest.length > CONFLICT_MOVEMENTS;
+  const movements = newest.slice(0, CONFLICT_MOVEMENTS).reverse();
   const message = current.archivedAt ? "This item is archived." : delta !== undefined
     ? delta > 0 ? "Stock cannot exceed 2,147,483,647." : `Only ${current.onHand} left`
     : "This item changed. Review the current stock and recount or explicitly keep yours.";
-  throw new StockConflictError(message, current, movements.map(movementView));
+  throw new StockConflictError(message, current, movements.map(movementView), truncated);
+}
+
+/**
+ * Run a write that may end in a stock conflict. The conflict rolls the transaction back, rate event included,
+ * so record the attempt in its own short transaction afterwards; rejected attempts still count.
+ */
+export async function countConflicts<T>(actorId: string, kind: "api_write" | "movement", limit: number, message: string, run: () => Promise<T>): Promise<T> {
+  try { return await run(); } catch (err) {
+    if (err instanceof StockConflictError) await db().transaction(tx => consumeRate(tx, actorId, kind, limit, message));
+    throw err;
+  }
 }
 
 /** Map only the known SKU/barcode constraints, never include query parameters in errors. */
@@ -98,33 +113,34 @@ export async function editItem(actor: { id: string }, workspaceId: string, itemI
   const member = await requireMember(actor, workspaceId, "manager");
   const { version, ...data } = editItemInput.parse(input);
   try {
-    return await db().transaction(async tx => {
+    return await countConflicts(actor.id, "api_write", 200, "Too many item changes. Try again later.", () => db().transaction(async tx => {
       await requireMember(actor, member.workspaceId, "manager", tx);
       await consumeRate(tx, actor.id, "api_write", 200, "Too many item changes. Try again later.");
       const [row] = await tx.update(item).set({ ...data, version: sql`${item.version} + 1`, updatedAt: new Date() })
         .where(and(itemScope(member.workspaceId, itemId), eq(item.version, version), isNull(item.archivedAt))).returning();
       if (!row) return stockConflict(tx, member.workspaceId, itemId, version);
       return row;
-    });
+    }));
   } catch (err) { inventoryError(err); }
 }
 
 export async function archiveItem(actor: { id: string }, workspaceId: string, itemId: string, input: unknown) {
   const member = await requireMember(actor, workspaceId, "manager");
   const { version } = archiveItemInput.parse(input);
-  return db().transaction(async tx => {
+  return countConflicts(actor.id, "api_write", 200, "Too many item changes. Try again later.", () => db().transaction(async tx => {
     await requireMember(actor, member.workspaceId, "manager", tx);
     await consumeRate(tx, actor.id, "api_write", 200, "Too many item changes. Try again later.");
     const [row] = await tx.update(item).set({ archivedAt: new Date(), version: sql`${item.version} + 1`, updatedAt: new Date() })
       .where(and(itemScope(member.workspaceId, itemId), eq(item.version, version), isNull(item.archivedAt))).returning();
     if (!row) return stockConflict(tx, member.workspaceId, itemId, version);
     return row;
-  });
+  }));
 }
 
 export async function lookupItem(actor: { id: string }, workspaceId: string, code: unknown) {
   const member = await requireMember(actor, workspaceId);
-  const value = barcodeInput.parse(code);
+  // A code may be a SKU or a barcode: look up by the SKU rules, not the GTIN check (barcodes were validated on create).
+  const value = fields.sku.parse(code);
   const rows = await db().select().from(item).where(and(eq(item.workspaceId, member.workspaceId), isNull(item.archivedAt), or(eq(item.barcode, value), eq(item.sku, value)))).limit(2);
   if (!rows.length) throw new NotFoundError("Not in this workspace");
   // A SKU may equal another item's barcode. Never silently record stock against the wrong item.

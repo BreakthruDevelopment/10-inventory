@@ -2,8 +2,8 @@ import "server-only";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "@/lib/db";
-import { ConflictError, NotFoundError } from "@/lib/errors";
-import { itemScope, movementView, stockConflict } from "@/lib/items";
+import { ClientOpReusedError, ConflictError, NotFoundError } from "@/lib/errors";
+import { countConflicts, itemScope, movementView, stockConflict } from "@/lib/items";
 import { requireMember } from "@/lib/tenancy";
 import { advisoryLock, consumeRate } from "@/lib/usage";
 
@@ -20,14 +20,18 @@ export async function recordMovement(actor: { id: string }, workspaceId: string,
   const member = await requireMember(actor, workspaceId);
   const data = movementInput.parse(input);
   const { item, stockMovement } = schema;
-  return db().transaction(async tx => {
+  return countConflicts(actor.id, "movement", 600, "Too many stock movements. Try again later.", () => db().transaction(async tx => {
+    // Key-share lock: a concurrent workspace delete waits for us instead of deadlocking on the item row.
+    const locked = await tx.execute(sql`select 1 from workspace where id = ${member.workspaceId} for key share`);
+    if (!locked.length) throw new NotFoundError();
     await requireMember(actor, member.workspaceId, "staff", tx);
     // This is only the operation's lock, never a workspace lock. Two different operations still race on the
     // conditional item UPDATE. Lock before the dedupe read so a concurrent retry observes the first commit.
     await advisoryLock(tx, `stock-op:${member.workspaceId}:${data.clientOpId}`);
     const [first] = await tx.select().from(stockMovement).where(and(eq(stockMovement.workspaceId, member.workspaceId), eq(stockMovement.clientOpId, data.clientOpId)));
     if (first) {
-      if (first.itemId !== data.itemId) throw new ConflictError("That operation id already belongs to another item.");
+      const sameQty = data.kind === "count" ? first.onHandAfter === data.qty : first.delta === (data.kind === "sale" ? -data.qty : data.qty);
+      if (first.itemId !== data.itemId || first.kind !== data.kind || !sameQty) throw new ClientOpReusedError();
       return movementView(first);
     }
     const scope = itemScope(member.workspaceId, data.itemId);
@@ -47,5 +51,5 @@ export async function recordMovement(actor: { id: string }, workspaceId: string,
       kind: data.kind, delta, onHandAfter: after.onHand, itemVersion: after.version, reason: data.reason, actorId: actor.id, clientOpId: data.clientOpId,
     }).returning();
     return movementView(movement);
-  });
+  }));
 }

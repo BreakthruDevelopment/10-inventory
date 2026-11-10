@@ -180,7 +180,7 @@ describe.skipIf(!url)("stock ledger (Postgres)", () => {
     for (const [kind, limit] of [["api_write", 200], ["movement", 600], ["export", 20]] as const) {
       await sql`delete from rate_event where user_id = ${manager.id}`;
       await sql`insert into rate_event (user_id, kind) select ${manager.id}, ${kind} from generate_series(1, ${limit})`;
-      const operation = kind === "api_write" ? items.editItem(manager, ws, row.id, { version: 1 }) : kind === "movement" ? move(row.id, "receive", 1, {}, manager) : exports.exportItems(manager, ws);
+      const operation = kind === "api_write" ? items.editItem(manager, ws, row.id, { version: 1, name: "Renamed" }) : kind === "movement" ? move(row.id, "receive", 1, {}, manager) : exports.exportItems(manager, ws);
       await expect(operation).rejects.toMatchObject({ status: 429 });
     }
     await sql`delete from rate_event where user_id = ${manager.id}`;
@@ -189,4 +189,64 @@ describe.skipIf(!url)("stock ledger (Postgres)", () => {
     expect(attempts.map(statusOf).sort()).toEqual([200, 409]);
     await reconcile(row.id);
   });
+  it("caps the stale-count conflict body at 50 movements and still rate-limits rejected attempts", async () => {
+    const row = await create();
+    await sql`insert into stock_movement (workspace_id,item_id,kind,delta,on_hand_after,item_version,actor_id,client_op_id)
+      select ${ws}, ${row.id}, 'receive', 1, g, g + 1, ${staff.id}, gen_random_uuid() from generate_series(1, 120) g`;
+    await sql`update item set on_hand = 120, version = 121 where id = ${row.id}`;
+    await expect(move(row.id, "count", 5, { expectedVersion: 1 })).rejects.toMatchObject({ status: 409, truncated: true, movements: expect.any(Array) });
+    const err = await move(row.id, "count", 5, { expectedVersion: 1 }).catch(e => e);
+    expect(err.movements).toHaveLength(50);
+    expect(err.movements.at(-1).itemVersion).toBe(121);
+    expect(err.movements[0].itemVersion).toBe(72);
+    await sql`delete from rate_event where user_id = ${staff.id}`;
+    await sql`insert into rate_event (user_id, kind) select ${staff.id}, 'movement' from generate_series(1, 598)`;
+    const results = await Promise.allSettled([1, 2, 3, 4].map(() => move(row.id, "count", 5, { expectedVersion: 1 })));
+    expect(results.map(statusOf).sort()).toEqual([409, 409, 429, 429]);
+  });
+
+  it("finds SKUs that are not valid barcodes", async () => {
+    const a = await create("12345678"); const b = await create("OAT MILK");
+    expect((await items.lookupItem(staff, ws, "12345678")).id).toBe(a.id);
+    expect((await items.lookupItem(staff, ws, "OAT MILK")).id).toBe(b.id);
+  });
+
+  it("rejects an item edit with no fields without bumping the version", async () => {
+    const row = await create();
+    await expect(items.editItem(manager, ws, row.id, { version: 1 })).rejects.toMatchObject({ name: "ZodError" });
+    expect((await items.getItem(manager, ws, row.id)).version).toBe(1);
+  });
+
+  it("rejects a reused clientOpId with a different item, kind or qty, but replays an identical one", async () => {
+    const a = await create("OP-A"), b = await create("OP-B");
+    const op = randomUUID();
+    const first = await move(a.id, "receive", 5, { clientOpId: op });
+    expect(await move(a.id, "receive", 5, { clientOpId: op })).toEqual(first);
+    for (const [id, kind, qty] of [[b.id, "receive", 5], [a.id, "sale", 5], [a.id, "receive", 6]] as const) {
+      const err = await move(id, kind, qty, { clientOpId: op }).catch(e => e);
+      expect(err).toMatchObject({ status: 409, code: "client_op_reused" });
+    }
+    const countOp = randomUUID();
+    await move(a.id, "count", 9, { clientOpId: countOp, expectedVersion: 2 });
+    expect((await move(a.id, "count", 9, { clientOpId: countOp, expectedVersion: 2 })).onHandAfter).toBe(9);
+    await expect(move(a.id, "count", 8, { clientOpId: countOp, expectedVersion: 2 })).rejects.toMatchObject({ code: "client_op_reused" });
+  });
+
+  it("does not deadlock a movement against a workspace delete", async () => {
+    const { createWorkspace } = await import("@/lib/workspaces");
+    for (let i = 0; i < 15; i++) {
+      const w = (await createWorkspace(manager, { name: `Doomed ${i}` })).id;
+      const row = await items.createItem(manager, w, { sku: "D", name: "D" });
+      await movements.recordMovement(manager, w, { itemId: row.id, kind: "receive", qty: 5, clientOpId: randomUUID() });
+      const race = await Promise.race([
+        Promise.allSettled([
+          movements.recordMovement(manager, w, { itemId: row.id, kind: "sale", qty: 1, clientOpId: randomUUID() }),
+          sql`delete from workspace where id = ${w}`,
+        ]),
+        new Promise(res => setTimeout(() => res("timeout"), 10000)),
+      ]);
+      expect(race).not.toBe("timeout");
+      await sql`delete from workspace where id = ${w}`;
+    }
+  }, 60000);
 });
