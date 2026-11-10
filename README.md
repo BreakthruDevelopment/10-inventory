@@ -1,4 +1,4 @@
-# 30 Apps Template
+# Inventory Management (app 10, built from the 30 Apps Template)
 
 The starting point for every app in Breakthru Ventures' **30 apps in 30 days** portfolio. Each app is a
 responsive web app with a Postgres database, sign-in with roles, one AI feature, and a single container
@@ -6,10 +6,29 @@ image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
 
 ## What this app does
 
-_Each app replaces this section: the customer problem, who uses it, and what the AI feature does._
+**Inventory Management** (app 10): stock counts that stay right without a scanner budget. Staff scan or search
+items on the phone they already carry, receive deliveries, record sales and do counts; managers see what is about
+to run out and why. This README section is a stub until the docs issue (10.7); what exists so far is the team layer.
 
-The template ships an example "items" feature: users manage their own items, admins see everyone's, and
-an AI summary describes the list.
+**Tenancy.** Stock belongs to a team, not a person. Every inventory row carries `workspace_id`, and the only way
+in is a `membership` row (`manager` or `staff`). Every data function takes the acting user and the workspace id
+from the URL and starts with `requireMember(actor, workspaceId, minRole)` (`src/lib/tenancy.ts`): non-members get
+**404** (never 403, so ids can't be probed), members without the role get **403**. Global roles stay `user` and
+`admin`; the admin sees counts only (workspaces, memberships, open invites, AI calls) and is not a member of
+anything. A workspace always keeps at least one manager.
+
+**Invites.** A manager creates a link (32-byte random token, only its SHA-256 stored, role chosen, 7-day expiry,
+single use, at most 10 open and 20 created a day per workspace, revocable). A signed-in user opens `/join/<token>`
+and accepts with a POST; accepting twice changes nothing, and every bad link (unknown, expired, revoked, used) is
+the same 404. No email is sent: the manager copies the link.
+
+| Limit | Value |
+| --- | --- |
+| Workspaces created per user | 3 |
+| Members per workspace | 20 |
+| Open invites / invites per day per workspace | 10 / 20 |
+| Invite accept attempts per user | 30 per hour |
+| Demo workspace ("Demo Corner Store": 1 manager, 2 staff) | Admin button or `pnpm seed:demo`; 1 per minute, 5 per day |
 
 ## Architecture
 

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, char, check, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Auth tables (shape required by Better Auth with the admin plugin).
@@ -69,22 +69,70 @@ export const verification = pgTable("verification", {
 });
 
 // ---------------------------------------------------------------------------
-// Example domain table. Each app replaces this with its own entities, keeping
-// the ownerId pattern so per-user access control stays enforceable in SQL.
+// Tenancy: workspaces, memberships and invites. Every inventory row (item, stock_movement, ... added by later
+// issues) carries `workspace_id`; access is decided by `requireMember()` in src/lib/tenancy.ts, never by a
+// per-user owner column. Global roles (`user`, `admin`) stay as they are; `admin` gets counts only.
 // ---------------------------------------------------------------------------
 
-export const item = pgTable(
-  "item",
+export const MEMBER_ROLES = ["manager", "staff"] as const;
+export type MemberRole = (typeof MEMBER_ROLES)[number];
+
+export const workspace = pgTable(
+  "workspace",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    ownerId: text("owner_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    title: text("title").notNull(),
-    body: text("body").notNull().default(""),
+    name: text("name").notNull(),
+    timeZone: text("time_zone").notNull().default("UTC"),
+    /** Who created it, for the per-user cap. Nulled when that account is deleted; membership decides access. */
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("item_owner_id_idx").on(t.ownerId)],
+  (t) => [
+    index("workspace_created_by_idx").on(t.createdBy),
+    check("workspace_name_chk", sql`char_length(${t.name}) between 1 and 80`),
+  ],
+);
+
+export const membership = pgTable(
+  "membership",
+  {
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role", { enum: MEMBER_ROLES }).notNull(),
+    joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.userId] }),
+    index("membership_user_idx").on(t.userId),
+    check("membership_role_chk", sql`${t.role} in ('manager', 'staff')`),
+  ],
+);
+
+/** Only the SHA-256 of the token is stored (the 32-byte token itself is shown once, in the link). */
+export const invite = pgTable(
+  "invite",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspace.id, { onDelete: "cascade" }),
+    tokenHash: char("token_hash", { length: 64 }).notNull().unique(),
+    role: text("role", { enum: MEMBER_ROLES }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedBy: text("used_by").references(() => user.id, { onDelete: "set null" }),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("invite_workspace_created_idx").on(t.workspaceId, t.createdAt),
+    check("invite_role_chk", sql`${t.role} in ('manager', 'staff')`),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -92,7 +140,7 @@ export const item = pgTable(
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
-export const RATE_KINDS = ["api_write", "ai", "upload"] as const;
+export const RATE_KINDS = ["api_write", "movement", "invite", "export", "ai", "demo_load"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
 
 const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
@@ -172,5 +220,7 @@ export const job = pgTable(
 );
 
 export type User = typeof user.$inferSelect;
-export type Item = typeof item.$inferSelect;
+export type Workspace = typeof workspace.$inferSelect;
+export type Membership = typeof membership.$inferSelect;
+export type Invite = typeof invite.$inferSelect;
 export type Job = typeof job.$inferSelect;

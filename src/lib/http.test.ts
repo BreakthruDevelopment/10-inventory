@@ -95,3 +95,15 @@ describe("errorResponse logging (issue #16)", () => {
     spy.mockRestore();
   });
 });
+
+describe("last-manager trigger", () => {
+  const pgError = Object.assign(new Error("A workspace needs at least one manager"), { code: "23514", constraint_name: "membership_last_manager" });
+  it("maps to 409 with a safe message, bare or wrapped by Drizzle", () => {
+    for (const err of [pgError, new DrizzleQueryError("delete from membership where secret", ["p"], pgError)]) {
+      expect(errorInfo(err)).toEqual({ status: 409, body: { error: "A workspace needs at least one manager." } });
+    }
+  });
+  it("other check violations stay a 500", () => {
+    expect(errorInfo(Object.assign(new Error("x"), { code: "23514", constraint_name: "other" })).status).toBe(500);
+  });
+});
