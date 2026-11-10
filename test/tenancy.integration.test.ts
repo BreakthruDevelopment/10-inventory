@@ -424,7 +424,7 @@ describe.skipIf(!url)("tenancy (Postgres)", () => {
   describe("admin", () => {
     it("sees counts only", async () => {
       const s = await stats.adminStats(admin);
-      expect(Object.keys(s).sort()).toEqual(["aiCallsToday", "aiDailyCap", "memberships", "openInvites", "users", "workspaces"]);
+      expect(Object.keys(s).sort()).toEqual(["aiCallsToday", "aiDailyCap", "items", "memberships", "movementsToday", "openInvites", "users", "workspaces"]);
       for (const v of Object.values(s)) expect(typeof v).toBe("number");
       expect(s.workspaces).toBeGreaterThanOrEqual(2);
       expect(JSON.stringify(s)).not.toMatch(/Alpha|Bravo|alice/);

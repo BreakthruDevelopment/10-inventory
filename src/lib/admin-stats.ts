@@ -7,14 +7,13 @@ import { dailyCount } from "@/lib/usage";
 
 /**
  * Admin sees counts only: how many users, workspaces, members and open invites, and today's AI calls against the
- * app-wide cap. No workspace names, no member names or emails, no item names or stock. Items and movements per day
- * are added with the item tables (issue 10.2).
+ * app-wide cap. No workspace names, no member names or emails, no item names or stock. Includes item and UTC-day movement counts.
  */
 export async function adminStats(actor: { role: string }) {
   if (actor.role !== "admin") throw new ForbiddenError();
   const d = db();
-  const { user, workspace, membership, invite } = schema;
-  const [[users], [workspaces], [memberships], [openInvites]] = await Promise.all([
+  const { user, workspace, membership, invite, item, stockMovement } = schema;
+  const [[users], [workspaces], [memberships], [openInvites], [items], [movementsToday]] = await Promise.all([
     d.select({ n: count() }).from(user),
     d.select({ n: count() }).from(workspace),
     d.select({ n: count() }).from(membership),
@@ -22,8 +21,12 @@ export async function adminStats(actor: { role: string }) {
       .select({ n: count() })
       .from(invite)
       .where(and(isNull(invite.usedAt), isNull(invite.revokedAt), gt(invite.expiresAt, sql`now()`))),
+    d.select({ n: count() }).from(item),
+    d.select({ n: count() }).from(stockMovement).where(sql`${stockMovement.createdAt} >= date_trunc('day', now() at time zone 'utc') at time zone 'utc'`),
   ]);
   return {
+    items: items.n,
+    movementsToday: movementsToday.n,
     users: users.n,
     workspaces: workspaces.n,
     memberships: memberships.n,

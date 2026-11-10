@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, char, check, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigserial, boolean, char, check, date, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Auth tables (shape required by Better Auth with the admin plugin).
@@ -224,3 +224,57 @@ export type Workspace = typeof workspace.$inferSelect;
 export type Membership = typeof membership.$inferSelect;
 export type Invite = typeof invite.$inferSelect;
 export type Job = typeof job.$inferSelect;
+
+// Inventory balances and the immutable ledger. Stock and version change in the same transaction as its movement.
+export const ITEM_UNITS = ["each", "case", "kg", "l"] as const;
+export const MOVEMENT_KINDS = ["receive", "sale", "adjust", "count"] as const;
+export const item = pgTable("item", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspace.id, { onDelete: "cascade" }),
+  sku: text("sku").notNull(),
+  name: text("name").notNull(),
+  barcode: text("barcode"),
+  unit: text("unit", { enum: ITEM_UNITS }).notNull().default("each"),
+  onHand: integer("on_hand").notNull().default(0),
+  reorderPoint: integer("reorder_point").notNull().default(0),
+  leadTimeDays: integer("lead_time_days").notNull().default(0),
+  packSize: integer("pack_size").notNull().default(1),
+  supplierName: text("supplier_name").notNull().default(""),
+  unitCostCents: integer("unit_cost_cents").notNull().default(0),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  version: integer("version").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("item_id_workspace_uidx").on(t.id, t.workspaceId),
+  uniqueIndex("item_workspace_sku_uidx").on(t.workspaceId, t.sku),
+  uniqueIndex("item_workspace_barcode_uidx").on(t.workspaceId, t.barcode).where(sql`${t.barcode} is not null`),
+  check("item_balance_chk", sql`${t.onHand} >= 0 and ${t.version} >= 1`),
+  check("item_fields_chk", sql`char_length(${t.sku}) between 1 and 40 and char_length(${t.name}) between 1 and 120 and (${t.barcode} is null or char_length(${t.barcode}) between 4 and 64) and char_length(${t.supplierName}) <= 120`),
+  check("item_unit_chk", sql`${t.unit} in ('each', 'case', 'kg', 'l')`),
+  check("item_reorder_chk", sql`${t.reorderPoint} between 0 and 100000 and ${t.leadTimeDays} between 0 and 90 and ${t.packSize} between 1 and 10000 and ${t.unitCostCents} >= 0`),
+]);
+
+export const stockMovement = pgTable("stock_movement", {
+  // Strings avoid losing precision when bigint ids are serialized as JSON.
+  id: bigserial("id", { mode: "bigint" }).primaryKey(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspace.id, { onDelete: "cascade" }),
+  itemId: uuid("item_id").notNull(),
+  kind: text("kind", { enum: MOVEMENT_KINDS }).notNull(),
+  delta: integer("delta").notNull(),
+  onHandAfter: integer("on_hand_after").notNull(),
+  itemVersion: integer("item_version").notNull(),
+  reason: text("reason").notNull().default(""),
+  // Retain the opaque audit id when an account is removed; an FK SET NULL would mutate the ledger.
+  actorId: text("actor_id").notNull(),
+  clientOpId: uuid("client_op_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  foreignKey({ columns: [t.itemId, t.workspaceId], foreignColumns: [item.id, item.workspaceId] }).onDelete("cascade"),
+  uniqueIndex("stock_movement_workspace_op_uidx").on(t.workspaceId, t.clientOpId),
+  index("stock_movement_workspace_item_created_idx").on(t.workspaceId, t.itemId, t.createdAt),
+  check("stock_movement_kind_chk", sql`${t.kind} in ('receive', 'sale', 'adjust', 'count')`),
+  check("stock_movement_values_chk", sql`${t.onHandAfter} >= 0 and ${t.itemVersion} >= 2 and char_length(${t.reason}) <= 200 and (${t.kind} <> 'receive' or ${t.delta} > 0) and (${t.kind} <> 'sale' or ${t.delta} < 0) and (${t.kind} <> 'adjust' or (${t.delta} <> 0 and char_length(${t.reason}) > 0))`),
+]);
+export type Item = typeof item.$inferSelect;
+export type StockMovement = typeof stockMovement.$inferSelect;

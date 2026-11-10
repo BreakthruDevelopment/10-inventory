@@ -15,7 +15,7 @@ import { releaseDaily, releaseRate, reserveDaily } from "@/lib/usage";
 
 export { DEMO_LOADS_PER_DAY };
 
-/** The demo team: one manager and two staff, in one café. Items and 60 days of movements are added by issue 10.2. */
+/** The demo team: one manager and two staff, in one café. Includes 60 days of ledger history, with several recent fast movers. */
 export const DEMO_WORKSPACE_NAME = "Demo Corner Store";
 const PEOPLE = [
   { name: "Maya", role: "manager" },
@@ -155,5 +155,39 @@ async function replaceWorkspace(tx: Tx, ids: Map<string, string>): Promise<DemoL
     .values({ name: DEMO_WORKSPACE_NAME, timeZone: "America/Denver", createdBy: ids.get("Maya")! })
     .returning({ id: workspace.id });
   await tx.insert(membership).values(PEOPLE.map((p) => ({ workspaceId: ws.id, userId: ids.get(p.name)!, role: p.role })));
+  await seedInventory(tx, ws.id, ids.get("Maya")!);
   return { users: PEOPLE.length, workspaces: 1, members: PEOPLE.length };
+}
+
+/** Deterministic sales quantities: 60 days, faster sales in the last week, and a reconciled cached balance. */
+async function seedInventory(tx: Tx, workspaceId: string, actorId: string) {
+  const products = [
+    { sku: "OAT-MILK", name: "Oat milk", barcode: "4006381333931", base: 3, fast: true, remaining: 6 },
+    { sku: "COFFEE", name: "Coffee beans", barcode: null, base: 2, fast: true, remaining: 8 },
+    { sku: "BREAD", name: "Sourdough bread", barcode: null, base: 4, fast: true, remaining: 5 },
+    { sku: "TEA", name: "Breakfast tea", barcode: null, base: 1, fast: false, remaining: 90 },
+    { sku: "SUGAR", name: "Sugar", barcode: null, base: 1, fast: false, remaining: 100 },
+    { sku: "CUPS", name: "Paper cups", barcode: null, base: 5, fast: false, remaining: 300 },
+  ];
+  for (const product of products) {
+    const sales = Array.from({ length: 60 }, (_, i) => product.base * (product.fast && i >= 53 ? 2 : 1));
+    const initial = sales.reduce((a, b) => a + b, product.remaining);
+    const firstDay = new Date(Date.now() - 60 * 86400000);
+    const [created] = await tx.insert(schema.item).values({
+      workspaceId, sku: product.sku, name: product.name, barcode: product.barcode,
+      reorderPoint: 12, leadTimeDays: 4, packSize: 6, supplierName: "Demo supplier", unitCostCents: 250,
+      onHand: product.remaining, version: 62, createdAt: firstDay,
+    }).returning();
+    let onHand = initial;
+    const ledger: (typeof schema.stockMovement.$inferInsert)[] = [{ workspaceId, itemId: created.id,
+      kind: "receive", delta: initial, onHandAfter: initial, itemVersion: 2, reason: "Demo opening delivery", actorId,
+      clientOpId: randomUUID(), createdAt: firstDay }];
+    for (let i = 0; i < sales.length; i++) {
+      onHand -= sales[i];
+      ledger.push({ workspaceId, itemId: created.id, kind: "sale", delta: -sales[i], onHandAfter: onHand,
+        itemVersion: i + 3, reason: "Demo daily sales", actorId, clientOpId: randomUUID(),
+        createdAt: new Date(firstDay.getTime() + i * 86400000 + 3600000) });
+    }
+    await tx.insert(schema.stockMovement).values(ledger);
+  }
 }

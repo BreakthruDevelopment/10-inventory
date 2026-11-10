@@ -1,3 +1,5 @@
+import type { Item, StockMovement } from "@/lib/db/schema";
+
 /** Typed domain errors. `errorResponse` maps `status` straight to the HTTP response. */
 export class HttpError extends Error {
   constructor(
@@ -46,4 +48,9 @@ export class UnprocessableError extends HttpError {
   constructor(message = "Unprocessable") {
     super(422, message);
   }
+}
+
+/** Client-safe inventory conflict: callers may show this state before explicitly resubmitting. */
+export class StockConflictError extends ConflictError {
+  constructor(message: string, readonly current: Item, readonly movements: (Omit<StockMovement, "id"> & { id: string })[]) { super(message); }
 }

@@ -81,6 +81,23 @@ ws=$(send "$JAR_A" POST /api/workspaces '{"name":"Smoke Corner Store"}' | field 
 expect "creator's role" manager "$(send "$JAR_A" GET "/api/w/$ws" | field workspace.role)"
 pass "user A created a workspace and is its manager"
 
+uuid() { node -e 'console.log(require("node:crypto").randomUUID())'; }
+item=$(send "$JAR_A" POST "/api/w/$ws/items" '{"sku":"SMOKE-OAT","name":"Smoke oat milk","barcode":"4006381333931","reorderPoint":8}' | field item.id)
+expect "barcode lookup" "$item" "$(send "$JAR_A" GET "/api/w/$ws/lookup?code=4006381333931" | field item.id)"
+expect "receive 10" 10 "$(send "$JAR_A" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"receive\",\"qty\":10,\"clientOpId\":\"$(uuid)\"}" | field movement.onHandAfter)"
+op=$(uuid)
+sale="{\"itemId\":\"$item\",\"kind\":\"sale\",\"qty\":3,\"clientOpId\":\"$op\"}"
+expect "sell 3" 7 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$sale" | field movement.onHandAfter)"
+expect "retry sale" 7 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$sale" | field movement.onHandAfter)"
+expect "stale count" 409 "$(status "$JAR_A" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"count\",\"qty\":10,\"expectedVersion\":2,\"clientOpId\":\"$(uuid)\"}")"
+expect "ledger reconciles" true "$(send "$JAR_A" GET "/api/w/$ws/items/$item" | field item.ledgerMatches)"
+expect "two ledger entries after retry" 2 "$(send "$JAR_A" GET "/api/w/$ws/items/$item" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).item.movements.length))')"
+expect "B cannot read item" 404 "$(status "$JAR_B" GET "/api/w/$ws/items/$item")"
+expect "B cannot record stock" 404 "$(status "$JAR_B" POST "/api/w/$ws/movements" "$sale")"
+expect "manager CSV export" 200 "$(status "$JAR_A" GET "/api/w/$ws/export/items.csv")"
+pass "item, barcode lookup, receive/sale, idempotency, stale count and ledger check"
+
+
 for path in "/api/w/$ws" "/api/w/$ws/members" "/api/w/$ws/invites"; do
   expect "B on $path" 404 "$(status "$JAR_B" GET "$path")"
 done
@@ -106,6 +123,11 @@ expect "invite list is hidden from staff" 403 "$(status "$JAR_B" GET "/api/w/$ws
 expect "staff can't create invites" 403 "$(status "$JAR_B" POST "/api/w/$ws/invites" '{"role":"staff"}')"
 expect "staff can't list members" 403 "$(status "$JAR_B" GET "/api/w/$ws/members")"
 pass "user B joined as staff once; staff can't invite or list members (403)"
+expect "staff can sell" 6 "$(send "$JAR_B" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"sale\",\"qty\":1,\"clientOpId\":\"$(uuid)\"}" | field movement.onHandAfter)"
+expect "staff cannot edit item" 403 "$(status "$JAR_B" PATCH "/api/w/$ws/items/$item" '{"version":4,"name":"Forbidden"}')"
+expect "staff cannot export" 403 "$(status "$JAR_B" GET "/api/w/$ws/export/items.csv")"
+pass "staff stock permissions"
+
 
 expect "C with a used link" 404 "$(status "$JAR_C" POST "/api/join/$token")"
 expect "C with a made-up link" 404 "$(status "$JAR_C" POST "/api/join/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")"

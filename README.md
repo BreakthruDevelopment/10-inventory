@@ -8,7 +8,7 @@ image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
 
 **Inventory Management** (app 10): stock counts that stay right without a scanner budget. Staff scan or search
 items on the phone they already carry, receive deliveries, record sales and do counts; managers see what is about
-to run out and why. This README section is a stub until the docs issue (10.7); what exists so far is the team layer.
+to run out and why. The data/API layer includes team access, items, barcode/SKU lookup, stock history and CSV downloads. Stock screens, scanning and forecasts follow in separate issues.
 
 **Tenancy.** Stock belongs to a team, not a person. Every inventory row carries `workspace_id`, and the only way
 in is a `membership` row (`manager` or `staff`). Every data function takes the acting user and the workspace id
@@ -29,6 +29,40 @@ the same 404. No email is sent: the manager copies the link.
 | Open invites / invites per day per workspace | 10 / 20 |
 | Invite accept attempts per user | 30 per hour |
 | Demo workspace ("Demo Corner Store": 1 manager, 2 staff) | Admin button or `pnpm seed:demo`; 1 per minute, 5 per day |
+
+### Items and stock API
+
+Managers create items at `POST /api/w/[id]/items` (`sku`, `name`, optional `barcode`, `unit`, `reorderPoint`,
+`leadTimeDays`, `packSize`, `supplierName`, `unitCostCents`). New items start at zero. Staff can list/search
+(`GET …/items?q=`), read detail/history (`GET …/items/[itemId]`) and look up an active item (`GET …/lookup?code=`).
+EAN-8, UPC-A and EAN-13 check digits are validated; ambiguous SKU/barcode matches return 409.
+
+`POST …/movements` takes `{itemId, kind, qty, clientOpId, reason?, expectedVersion?}`. `receive` and `sale` take a
+positive integer quantity; `adjust` takes a signed nonzero quantity and a reason; `count` takes an absolute
+nonnegative quantity and `expectedVersion`. Every submit needs a client-generated UUID. Reuse it on retry:
+the original movement receipt (including `onHandAfter` and `itemVersion`) is returned without changing stock again.
+An operation id is unique within the workspace and cannot be reused for another item.
+
+Stock deltas use a conditional atomic update and refuse negative balances or integer overflow. Counts and
+manager item edits (`PATCH …/items/[itemId]`, body includes `version`) reject stale versions with 409 and
+`{error, current, movements}`. `current` includes `onHand` and `version`; movements are those after the submitted
+version. Recount or explicitly resubmit the count with the current version to keep yours. No request silently
+retries an absolute count. `DELETE …/items/[itemId]` with `{version}` archives; it never deletes history.
+Detail responses include the latest 200 movements, `ledgerBalance` and `ledgerMatches`.
+
+The ledger rejects SQL UPDATE, DELETE and TRUNCATE. Deleting the owning workspace is the sole deletion exception,
+needed for demo replacement and removing a solo account; archiving an item preserves its ledger. Actor ids remain
+as opaque audit identifiers after account removal. Each movement stores its resulting item version for exact
+conflict history. Balances and ledger appends commit or roll back together.
+
+Manager CSV attachments: `GET …/export/items.csv` (active items) and `…/export/reorder.csv` (active items at or below
+their reorder point). Both include stock, supplier and replenishment settings; forecast metrics will be added by
+issue 10.3. Cells are quoted, quotes escaped and formula prefixes neutralized. Limits: 2,000 items including
+archives, 200 item writes/user/hour, 600 movements/user/hour, 20 exports/user/hour. Movement retries do not consume
+another rate slot. Integration tests repeat concurrent sales and idempotency 20 times and reconcile ledger sums.
+
+The demo loader seeds six items and 60 days of movements, including three products selling faster in the last
+week. Admin stats expose only item counts and today's UTC movement count, never item names or balances.
 
 ## Architecture
 

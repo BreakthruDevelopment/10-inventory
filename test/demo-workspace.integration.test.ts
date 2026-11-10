@@ -101,6 +101,20 @@ describe.skipIf(!url)("demo workspace (Postgres, Better Auth)", () => {
     expect(s.users.every((u) => u.image === "urn:breakthru:inventory-demo:v1" && u.role === "user")).toBe(true);
   });
 
+  it("seeds sixty days of reconciled history, including three fast movers", async () => {
+    const rows = await sql`select i.sku, i.on_hand, coalesce(sum(m.delta),0)::int balance,
+      count(*) filter (where m.kind = 'sale')::int sales,
+      count(distinct m.created_at::date) filter (where m.kind = 'sale')::int days,
+      avg(-m.delta) filter (where m.kind = 'sale' and m.created_at > now() - interval '8 days') recent,
+      avg(-m.delta) filter (where m.kind = 'sale' and m.created_at <= now() - interval '8 days') older
+      from item i join workspace w on w.id = i.workspace_id
+      join stock_movement m on m.item_id = i.id and m.workspace_id = i.workspace_id
+      where w.name = 'Demo Corner Store' group by i.id`;
+    expect(rows).toHaveLength(6);
+    expect(rows.every(r => r.sales === 60 && r.days === 60 && r.on_hand === r.balance)).toBe(true);
+    expect(rows.filter(r => Number(r.recent) > Number(r.older) * 1.3)).toHaveLength(3);
+  });
+
   it("a reload replaces the demo workspace and leaves real users' workspaces alone", async () => {
     const { createWorkspace } = await import("@/lib/workspaces");
     const mine = await createWorkspace(real, { name: "Real shop" });
