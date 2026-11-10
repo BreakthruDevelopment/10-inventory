@@ -278,3 +278,28 @@ export const stockMovement = pgTable("stock_movement", {
 ]);
 export type Item = typeof item.$inferSelect;
 export type StockMovement = typeof stockMovement.$inferSelect;
+
+/**
+ * The latest plain-language explanations per workspace, keyed by the hash of what the model was shown. `data` holds only
+ * the guarded choices (item ids, driver codes, a vocabulary-checked phrase): no names, and no sentences, which are
+ * rendered from the current numbers on read. `mode` says whether a live model or the recorded demo wrote it.
+ */
+export const forecastExplanation = pgTable("forecast_explanation", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspace.id, { onDelete: "cascade" }),
+  inputHash: char("input_hash", { length: 64 }).notNull(),
+  data: jsonb("data").$type<Record<string, unknown>>().notNull(),
+  mode: text("mode", { enum: ["live", "demo"] }).notNull(),
+  createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.workspaceId, t.inputHash] }),
+  index("forecast_explanation_workspace_created_idx").on(t.workspaceId, t.createdAt),
+  check("forecast_explanation_mode_chk", sql`${t.mode} in ('live', 'demo')`),
+]);
+
+/** One row per model call made for a workspace: the per-workspace hourly cap counts these. Rows are deleted once an hour old. */
+export const forecastCall = pgTable("forecast_call", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspace.id, { onDelete: "cascade" }),
+  at: timestamp("at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+}, (t) => [index("forecast_call_workspace_at_idx").on(t.workspaceId, t.at)]);

@@ -97,6 +97,19 @@ expect "B cannot record stock" 404 "$(status "$JAR_B" POST "/api/w/$ws/movements
 expect "manager CSV export" 200 "$(status "$JAR_A" GET "/api/w/$ws/export/items.csv")"
 pass "item, barcode lookup, receive/sale, idempotency, stale count and ledger check"
 
+# Forecast: the new item has no sales history, so it is no_data; nothing needs a reorder, so no model is asked.
+forecast=$(send "$JAR_A" GET "/api/w/$ws/forecast")
+expect "forecast status of a new item" no_data "$(echo "$forecast" | field items.0.status)"
+expect "forecast item count" 1 "$(echo "$forecast" | field items.length)"
+expect "forecast has no explanation yet" null "$(echo "$forecast" | field explanation)"
+explained=$(send "$JAR_A" POST "/api/w/$ws/forecast/explain")
+expect "nothing to explain" 0 "$(echo "$explained" | field explanation.items.length)"
+expect "B cannot read the forecast" 404 "$(status "$JAR_B" GET "/api/w/$ws/forecast")"
+expect "B cannot ask for an explanation" 404 "$(status "$JAR_B" POST "/api/w/$ws/forecast/explain")"
+expect "anonymous forecast" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/w/$ws/forecast")"
+expect "cross-origin explain" 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -b "$JAR_A" -H 'origin: https://evil.example' "$BASE_URL/api/w/$ws/forecast/explain")"
+pass "forecast: no_data for a new item, no model call, outsiders 404"
+
 
 for path in "/api/w/$ws" "/api/w/$ws/members" "/api/w/$ws/invites"; do
   expect "B on $path" 404 "$(status "$JAR_B" GET "$path")"
@@ -126,6 +139,8 @@ pass "user B joined as staff once; staff can't invite or list members (403)"
 expect "staff can sell" 6 "$(send "$JAR_B" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"sale\",\"qty\":1,\"clientOpId\":\"$(uuid)\"}" | field movement.onHandAfter)"
 expect "staff cannot edit item" 403 "$(status "$JAR_B" PATCH "/api/w/$ws/items/$item" '{"version":4,"name":"Forbidden"}')"
 expect "staff cannot export" 403 "$(status "$JAR_B" GET "/api/w/$ws/export/items.csv")"
+expect "staff cannot read the forecast" 403 "$(status "$JAR_B" GET "/api/w/$ws/forecast")"
+expect "staff cannot ask for an explanation" 403 "$(status "$JAR_B" POST "/api/w/$ws/forecast/explain")"
 pass "staff stock permissions"
 
 

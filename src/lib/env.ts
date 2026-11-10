@@ -26,7 +26,7 @@ const schema = z.object({
   AI_EMBED_MODEL: z.string().optional(),
   // Provider call timeout. 20 s keeps AI calls inside Lambda's 29 s limit (route maxDuration is 25 s).
   AI_TIMEOUT_MS: z.coerce.number().int().positive().max(22000).default(20000),
-  // App-wide cap on AI explanations per UTC day (free-tier budget). Used by the admin counts now, enforced by 10.3.
+  // App-wide cap on AI explanations per UTC day (free-tier budget). Enforced by `explainForecast` (src/lib/forecast-service.ts) and shown in the admin counts.
   FORECAST_DAILY_CAP: z.coerce.number().int().min(0).max(100000).default(150),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
