@@ -6,7 +6,7 @@ import { z } from "zod";
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  APP_NAME: z.string().default("30 Apps Template"),
+  APP_NAME: z.string().default("Inventory Management"),
   // The public URL, e.g. https://app7.breakthruventures.ai. Sign-in callbacks,
   // cookies and CORS all derive from it, so a domain change never touches code.
   APP_URL: z.string().url().default("http://localhost:3000"),
@@ -26,6 +26,8 @@ const schema = z.object({
   AI_EMBED_MODEL: z.string().optional(),
   // Provider call timeout. 20 s keeps AI calls inside Lambda's 29 s limit (route maxDuration is 25 s).
   AI_TIMEOUT_MS: z.coerce.number().int().positive().max(22000).default(20000),
+  // App-wide cap on AI explanations per UTC day (free-tier budget). Used by the admin counts now, enforced by 10.3.
+  FORECAST_DAILY_CAP: z.coerce.number().int().min(0).max(100000).default(150),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
