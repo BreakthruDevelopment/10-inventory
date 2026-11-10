@@ -12,6 +12,8 @@
  * - `reorder_by` = the date `on_hand` reaches `reorder_point`, minus `lead_time_days`, never earlier than today.
  * - `safety_stock` = ceil(0.5 x avg_daily x lead_time_days).
  * - `suggested_qty` = max(0, avg_daily x (lead_time_days + 14) + safety_stock - on_hand), rounded up to `pack_size`.
+ * - Status and every cover comparison use the cover as displayed (1 decimal), so "cover is shorter than the lead time"
+ *   always agrees with the number on the page.
  * - Status: `no_data` (under 7 days of history, or no sales: no forecast is made), else `reorder_now` (on hand at
  *   or below the reorder point, or cover shorter than the lead time), `reorder_soon` (cover shorter than lead time
  *   + 7 days), otherwise `ok`.
@@ -28,6 +30,8 @@ export const MAX_DATE_HORIZON_DAYS = 3650;
 /** Trend above/below which the explanation may mention a change in pace. */
 export const TREND_HIGH = 1.3;
 export const TREND_LOW = 0.7;
+/** Fewest units sold in the last 7 days for "faster" or "slower" to be claimed: a handful of units is noise, not a trend. */
+export const MIN_RECENT_UNITS = 3;
 
 export const FORECAST_STATUSES = ["reorder_now", "reorder_soon", "ok", "no_data"] as const;
 export type ForecastStatus = (typeof FORECAST_STATUSES)[number];
@@ -53,6 +57,8 @@ export type ForecastMetrics = {
   avgDaily: number | null;
   /** Last 7 days against the 28-day average, 2 decimals. */
   trend: number | null;
+  /** Units sold in the last 7 days. Null when no forecast is made. */
+  recentUnits: number | null;
   /** 1 decimal. */
   daysOfCover: number | null;
   stockoutDate: string | null;
@@ -74,6 +80,7 @@ export const NO_DATA: ForecastMetrics = {
   status: "no_data",
   avgDaily: null,
   trend: null,
+  recentUnits: null,
   daysOfCover: null,
   stockoutDate: null,
   reorderBy: null,
@@ -108,7 +115,9 @@ export function computeForecast(input: ForecastInput): ForecastMetrics {
   const windowDays = Math.min(WINDOW_DAYS, input.historyDays);
   const avg = sold28 / windowDays;
   const trend = sold7 / RECENT_DAYS / avg;
-  const cover = onHand / avg;
+  // Rounded once, here: status, drivers and the page all read this value.
+  const rawCover = onHand / avg;
+  const cover = round(rawCover, 1);
 
   const dateIn = (days: number) => (days > MAX_DATE_HORIZON_DAYS ? null : addDays(today, Math.max(0, Math.floor(days + EPS))));
   const safetyStock = ceil(SAFETY_FACTOR * avg * leadTimeDays);
@@ -123,8 +132,9 @@ export function computeForecast(input: ForecastInput): ForecastMetrics {
     status,
     avgDaily: round(avg, 2),
     trend: round(trend, 2),
-    daysOfCover: round(cover, 1),
-    stockoutDate: dateIn(cover),
+    recentUnits: sold7,
+    daysOfCover: cover,
+    stockoutDate: dateIn(rawCover),
     reorderBy: dateIn((onHand - reorderPoint) / avg - leadTimeDays),
     safetyStock,
     suggestedQty,
@@ -141,14 +151,19 @@ export type ItemForecast = ForecastMetrics & {
   leadTimeDays: number;
   packSize: number;
   historyDays: number;
+  /** On hand is at or below the reorder point. Shown even when no forecast is made, so a stocked-out item isn't hidden. */
+  belowReorderPoint: boolean;
 };
 
-const STATUS_RANK: Record<ForecastStatus, number> = { reorder_now: 0, reorder_soon: 1, ok: 2, no_data: 3 };
+const STATUS_RANK: Record<ForecastStatus, number> = { reorder_now: 0, reorder_soon: 1, ok: 3, no_data: 4 };
+
+/** Sort rank: a no_data item that is at or below its reorder point sits above the ok items, not at the bottom. */
+const rank = (r: ItemForecast) => (r.status === "no_data" && r.belowReorderPoint ? 2 : STATUS_RANK[r.status]);
 
 /** Most urgent first: status, then least cover, then SKU so the order is stable. */
 export function compareForecast(a: ItemForecast, b: ItemForecast): number {
   return (
-    STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+    rank(a) - rank(b) ||
     (a.daysOfCover ?? Infinity) - (b.daysOfCover ?? Infinity) ||
     a.sku.localeCompare(b.sku) ||
     a.itemId.localeCompare(b.itemId)

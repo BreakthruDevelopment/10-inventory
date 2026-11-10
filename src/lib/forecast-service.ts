@@ -16,6 +16,8 @@ import {
   type Choices,
   DRIVERS,
   CAVEATS,
+  NOTES,
+  OVERVIEWS,
   type Explanation,
   buildModelInput,
   inputHash,
@@ -86,7 +88,7 @@ export async function loadForecastRows(executor: Reader, workspaceId: string, no
     const historyDays = Math.max(0, Math.floor((now.getTime() - start) / DAY_MS));
     const base = {
       itemId: r.id, sku: r.sku, name: r.name, unit: r.unit, onHand: r.on_hand, reorderPoint: r.reorder_point,
-      leadTimeDays: r.lead_time_days, packSize: r.pack_size, historyDays,
+      leadTimeDays: r.lead_time_days, packSize: r.pack_size, historyDays, belowReorderPoint: r.on_hand <= r.reorder_point,
     };
     return { ...base, ...computeForecast({ ...base, sold28: Number(r.sold28), sold7: Number(r.sold7), today }) };
   });
@@ -94,12 +96,12 @@ export async function loadForecastRows(executor: Reader, workspaceId: string, no
 }
 
 const choicesSchema = z.object({
-  overview: z.string().max(200),
+  overview: z.enum(["none", ...OVERVIEWS]),
   items: z.array(z.object({
     itemId: z.string().uuid(),
     status: z.enum(["reorder_now", "reorder_soon"]),
     drivers: z.array(z.enum(DRIVERS)).max(3),
-    phrase: z.string().max(200),
+    note: z.enum(["none", ...NOTES]),
   })).max(25),
   caveats: z.array(z.enum(CAVEATS)).max(3),
 });
@@ -141,8 +143,9 @@ export type ExplainResult = { explanation: Explanation; cached: boolean; generat
 /**
  * Manager-only, on request. Order: the same numbers already explained are served from the cache for free; otherwise the
  * per-workspace hourly cap and the app-wide daily cap are reserved in one short transaction (before the model call, never
- * held across it), the model is called through `generate()`, the guarded choices are cached, and a failed call refunds
- * its reservation. Nothing here changes stock; the explanation is text beside the table.
+ * held across it), the model is called through `generate()`, the guarded choices are cached, and a call that throws refunds
+ * its own reservation. A throw happens only with `AI_FALLBACK_TO_DEMO=false`; with fallback on, a failing provider is
+ * answered from the demo fixture and the reservation stays spent. Nothing here changes stock; the explanation is text beside the table.
  */
 export async function explainForecast(actor: { id: string }, workspaceId: string, now: Date = new Date()): Promise<ExplainResult> {
   const member = await requireMember(actor, workspaceId, "manager");
@@ -163,7 +166,7 @@ export async function explainForecast(actor: { id: string }, workspaceId: string
     return { explanation: renderExplanation(rows, stored.choices, stored.mode === "demo"), cached: true, generatedAt: stored.createdAt.toISOString() };
   }
 
-  await db().transaction(async (tx) => {
+  const reservation = await db().transaction(async (tx) => {
     await requireMember(actor, member.workspaceId, "manager", tx);
     await advisoryLock(tx, `forecast-explain:${member.workspaceId}`);
     await tx.delete(forecastCall).where(and(eq(forecastCall.workspaceId, member.workspaceId), sql`${forecastCall.at} <= now() - interval '1 hour'`));
@@ -174,14 +177,15 @@ export async function explainForecast(actor: { id: string }, workspaceId: string
     if (!(await reserveDaily(tx, "ai", env().FORECAST_DAILY_CAP))) {
       throw new TooManyRequestsError("The app's daily limit for AI explanations has been reached. The numbers above are unaffected; try again tomorrow.");
     }
-    await tx.insert(forecastCall).values({ workspaceId: member.workspaceId });
+    const [call] = await tx.insert(forecastCall).values({ workspaceId: member.workspaceId }).returning({ id: forecastCall.id });
+    return call.id;
   });
 
   let run;
   try {
     run = await runExplain(rows);
   } catch (err) {
-    await refund(member.workspaceId);
+    await refund(member.workspaceId, reservation);
     throw err;
   }
 
@@ -203,12 +207,12 @@ export async function explainForecast(actor: { id: string }, workspaceId: string
   return { explanation: renderExplanation(rows, run.choices, run.demo), cached: false, generatedAt };
 }
 
-/** Give back one reservation whose model call never produced an answer. Best effort: it must not hide the real error. */
-async function refund(workspaceId: string): Promise<void> {
+/** Give back this request's own reservation (its `forecast_call` row, by id) when the model call threw. Best effort: it must not hide the real error. */
+async function refund(workspaceId: string, callId: string): Promise<void> {
   try {
     await db().transaction(async (tx) => {
       await advisoryLock(tx, `forecast-explain:${workspaceId}`);
-      await tx.execute(sql`delete from forecast_call where id = (select id from forecast_call where workspace_id = ${workspaceId} order by at desc limit 1)`);
+      await tx.execute(sql`delete from forecast_call where id = ${callId} and workspace_id = ${workspaceId}`);
       await releaseDaily(tx, "ai");
     });
   } catch (err) {

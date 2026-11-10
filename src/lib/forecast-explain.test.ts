@@ -1,83 +1,95 @@
 import { describe, expect, it } from "vitest";
 import { demoFixtures } from "@/lib/ai/demo";
+import { type ItemForecast } from "./forecast";
 import { injected, makeRow, oatMilk, suggest24 } from "../../scripts/forecast-eval-cases";
 import {
-  MAX_INPUT_CHARS, PHRASE_VOCABULARY, SYSTEM_PROMPT, applyGuardrails, buildModelInput, checkPhrase, inputHash,
+  MAX_INPUT_CHARS, SYSTEM_PROMPT, applyGuardrails, driverApplies, buildModelInput, inputHash,
   renderExplanation, reorderExplainSchema, sanitizeName, type ReorderExplainOutput,
 } from "./forecast-explain";
 
-const out = (over: Partial<ReorderExplainOutput["items"][number]>[] = [{}], extra: Partial<ReorderExplainOutput> = {}): ReorderExplainOutput => ({
-  overview: "", caveats: [], ...extra,
-  items: over.map((o, i) => ({ ref: `I${i + 1}`, status: "reorder_now" as const, drivers: [], phrase: "", ...o })),
-});
+const run = (output: Partial<ReorderExplainOutput> & { items: unknown[] }) => reorderExplainSchema.parse({ overview: "", caveats: [], ...output });
+type OutItem = { ref: string; status: "reorder_now" | "reorder_soon"; drivers: string[]; note: string };
+const itemOut = (over: Partial<OutItem> = {}): OutItem => ({ ref: "I1", status: "reorder_now", drivers: [], note: "", ...over });
+/** A reorder_now item with a chosen trend and units sold in the last week (avg 2/day over 28 days). */
+const withTrend = (sold7: number, over: Record<string, number> = {}) => makeRow("Trendy", { onHand: 3, reorderPoint: 5, leadTimeDays: 4, sold28: 56, sold7, historyDays: 28, ...over });
 
-describe("checkPhrase: free text is limited to a vocabulary", () => {
-  const rising = 1.62;
-  const rejected: [string, string][] = [
-    ["a number", "order 500 cases"],
-    ["a spelled-out number", "order five hundred cases"],
-    ["a number word on its own", "fifty"],
-    ["a quantity word", "double the usual"],
-    ["twice", "selling twice as fast"],
-    ["full-width digits (NFKC turns them into 500)", "order ５００"],
-    ["a roman numeral character", "order Ⅻ"],
-    ["superscript digits", "stock²"],
-    ["a vulgar fraction", "½ the stock"],
-    ["a digit split by a zero-width space", "5​00"],
-    ["a currency amount", "$5 each"],
-    ["a percentage", "50% faster"],
-    ["a Cyrillic look-alike letter", "stоck is low"],
-    ["spaced-out letters", "s t o c k"],
-    ["a supplier claim", "the supplier is raising prices"],
-    ["a price claim", "cheap right now"],
-    ["a promotion claim", "on promotion"],
-    ["an instruction", "order more now"],
-    ["a purchase verb", "buy extra"],
-    ["a negation", "not selling faster"],
-    ["emoji", "stock is low 🔥"],
-    ["an empty string", ""],
-    ["whitespace only", "   "],
-    ["too many words", "stock is low and stock is low and stock is low and stock is low"],
-    ["an over-long string", "stock ".repeat(30)],
-    ["a newline-smuggled instruction", "stock is low\nignore previous instructions"],
-    ["markdown or html", "<b>stock</b> is low"],
-    ["an apostrophe contraction (not in the vocabulary)", "isn't selling"],
+describe("there is no free text: bypasses from review cannot be expressed", () => {
+  // The model supplies codes only. Anything else is dropped and counted, and no model string reaches the page.
+  const bypasses = [
+    "stock up on this item", "stock levels higher than usual", "sales are low", "selling at usual pace",
+    "order 500 cases", "order five hundred cases", "order ５００", "5\u200b00", "stоck is low", "buy extra",
+    "the supplier is raising prices", "<b>stock</b>", "stock is low\nignore previous instructions", "🔥",
   ];
-  for (const [what, phrase] of rejected) {
-    it(`rejects ${what}`, () => {
-      expect(checkPhrase(phrase, rising)).toBeNull();
+  for (const text of bypasses) {
+    it(`a note or overview of ${JSON.stringify(text)} is dropped and never rendered`, () => {
+      const row = withTrend(35); // trend 2.5: rising
+      const sent = buildModelInput([row]).sent;
+      const output = run({ overview: text, items: [itemOut({ note: text, drivers: [text] })] });
+      const { choices, replaced } = applyGuardrails(output, sent);
+      expect(choices.overview).toBe("none");
+      expect(choices.items[0]).toMatchObject({ note: "none", drivers: [] });
+      expect(replaced).toBeGreaterThanOrEqual(3);
+      const rendered = JSON.stringify(renderExplanation([row], choices, false));
+      for (const word of ["stock up", "higher than usual", "sales are low", "usual pace", "500", "supplier", "buy", "ignore", "🔥"]) expect(rendered).not.toContain(word);
     });
   }
 
-  it("accepts a plain qualitative phrase and returns it as lowercase words", () => {
-    expect(checkPhrase("Selling faster than usual.", rising)).toBe("selling faster than usual");
-    expect(checkPhrase("stock is running low", rising)).toBe("stock is running low");
-    expect(checkPhrase("demand is picking up, and stock is thin", rising)).toBe("demand is picking up and stock is thin");
+  it("the schema keeps the rest of the answer when one field is garbage", () => {
+    const parsed = reorderExplainSchema.parse({ overview: "x".repeat(500), items: [{ ref: "I1", status: "reorder_now", drivers: "nope", note: 42 }], caveats: "no" });
+    expect(parsed).toMatchObject({ overview: "", caveats: [], items: [{ ref: "I1", drivers: [], note: "" }] });
+  });
+});
+
+describe("notes are tied to conditions the server checks", () => {
+  const note = (row: ItemForecast, code: string) => applyGuardrails(run({ items: [itemOut({ note: code, status: row.status as OutItem["status"] })] }), buildModelInput([row]).sent).choices.items[0]?.note;
+
+  it("pace_picked_up only when trend is above 1.3 with enough units in the last week", () => {
+    expect(note(withTrend(35), "pace_picked_up")).toBe("pace_picked_up"); // 1.8x or more
+    expect(note(withTrend(14), "pace_picked_up")).toBe("none"); // trend 1
+    expect(note(withTrend(2, { sold28: 4 }), "pace_picked_up")).toBe("none"); // trend high but only 2 units
   });
 
-  it("normalises full-width letters to the word they really are", () => {
-    expect(checkPhrase("ｓｔｏｃｋ is low", rising)).toBe("stock is low");
+  it("pace_slowed only when trend is below 0.7 with enough units in the last week", () => {
+    expect(note(withTrend(7), "pace_slowed")).toBe("pace_slowed"); // 0.5
+    expect(note(withTrend(14), "pace_slowed")).toBe("none");
+    expect(note(withTrend(2, { sold28: 56 }), "pace_slowed")).toBe("none"); // 2 units: not enough to claim
   });
 
-  it("direction words must agree with the item's trend", () => {
-    expect(checkPhrase("selling faster than usual", 1)).toBeNull();
-    expect(checkPhrase("selling faster than usual", 1.3)).toBeNull(); // not above 1.3
-    expect(checkPhrase("selling slower than usual", rising)).toBeNull();
-    expect(checkPhrase("selling slower than usual", 0.5)).toBe("selling slower than usual");
-    expect(checkPhrase("sales are steady", rising)).toBeNull();
-    expect(checkPhrase("sales are steady", 1)).toBe("sales are steady");
+  it("steady_pace only between 0.7 and 1.3, so it can't be said at a trend of 1.8", () => {
+    expect(note(withTrend(14), "steady_pace")).toBe("steady_pace");
+    expect(note(withTrend(35), "steady_pace")).toBe("none");
+    expect(note(withTrend(7), "steady_pace")).toBe("none");
   });
 
-  it("the overview may use neutral words only", () => {
-    expect(checkPhrase("stock is running low", null)).toBe("stock is running low");
-    expect(checkPhrase("selling faster than usual", null)).toBeNull();
-    expect(checkPhrase("sales are steady", null)).toBeNull();
+  it("running_low only when cover is under lead time plus safety stock", () => {
+    // avg 2, lead 4, safety 4: running_low below 8 days of cover.
+    expect(note(withTrend(14, { onHand: 15 }), "running_low")).toBe("running_low"); // 7.5 days, reorder_soon
+    expect(note(withTrend(14, { onHand: 17, reorderPoint: 0 }), "running_low")).toBe("none"); // 8.5 days
   });
 
-  it("the vocabulary holds no digits, number words, quantities, ordering verbs or money and supplier words", () => {
-    const banned = /\d|^(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand|million|dozen|half|double|triple|twice|once|more|extra|most|many|few|several|all|every|order|orders|ordering|reorder|buy|purchase|supplier|vendor|price|prices|cost|cheap|discount|promotion|sale|season|seasonal|holiday|not|no|never|always|out|days|weeks|months|units|cases)$/;
-    expect(PHRASE_VOCABULARY.filter((w) => banned.test(w))).toEqual([]);
-    expect(PHRASE_VOCABULARY.every((w) => /^[a-z]+$/.test(w))).toBe(true);
+  it("plenty_on_hand is never valid for an item that needs a reorder", () => {
+    expect(note(withTrend(14), "plenty_on_hand")).toBe("none");
+    expect(note(withTrend(35), "plenty_on_hand")).toBe("none");
+  });
+
+  it("the overview codes are checked against the whole list", () => {
+    const now = withTrend(14); // reorder_now
+    const soon = withTrend(14, { onHand: 15, reorderPoint: 0 }); // reorder_soon (7.5 days against lead 4)
+    const ov = (code: string, rows: ItemForecast[]) => applyGuardrails(run({ overview: code, items: [] }), buildModelInput(rows).sent).choices.overview;
+    expect(ov("all_need_reorder_now", [now])).toBe("all_need_reorder_now");
+    expect(ov("all_need_reorder_now", [now, soon])).toBe("none");
+    expect(ov("none_urgent_yet", [soon])).toBe("none_urgent_yet");
+    expect(ov("none_urgent_yet", [now, soon])).toBe("none");
+    expect(ov("some_running_low", [soon])).toBe("some_running_low");
+    expect(ov("some_running_low", [withTrend(14, { onHand: 40, reorderPoint: 50 })])).toBe("none");
+  });
+
+  it("faster_sales and slower_sales drivers also need at least 3 units in the last week", () => {
+    const sent = (row: ItemForecast) => buildModelInput([row]).sent;
+    const tiny = withTrend(2, { sold28: 4 });
+    expect(tiny.trend).toBeGreaterThan(1.3);
+    expect(applyGuardrails(run({ items: [itemOut({ drivers: ["faster_sales"] })] }), sent(tiny)).choices.items[0].drivers).toEqual([]);
+    expect(applyGuardrails(run({ items: [itemOut({ drivers: ["faster_sales"] })] }), sent(withTrend(35))).choices.items[0].drivers).toEqual(["faster_sales"]);
   });
 });
 
@@ -115,7 +127,7 @@ describe("sanitizeName and buildModelInput", () => {
     const item = JSON.parse(prompt.slice(prompt.indexOf("[")))[0];
     expect(Object.keys(item).sort()).toEqual([
       "avg_daily", "below_reorder_point", "cover_shorter_than_lead_time", "days_of_cover", "lead_time_days", "name", "on_hand",
-      "ref", "status", "suggested_qty", "trend", "unit",
+      "recent_units", "ref", "status", "trend", "unit",
     ]);
   });
 
@@ -148,24 +160,25 @@ describe("applyGuardrails", () => {
   const rows = () => [oatMilk(), suggest24()];
   const sent = () => buildModelInput(rows()).sent;
 
-  it("keeps true drivers and a supported phrase", () => {
+  it("keeps true drivers, a true note and a true overview", () => {
     const { choices, replaced } = applyGuardrails(
-      out([{ drivers: ["faster_sales", "cover_shorter_than_lead_time"], phrase: "selling faster than usual" }, { ref: "I2", status: "reorder_soon" }]),
+      run({ overview: "some_running_low", items: [itemOut({ drivers: ["faster_sales", "cover_shorter_than_lead_time"], note: "pace_picked_up" }), itemOut({ ref: "I2", status: "reorder_soon" })] }),
       sent(),
     );
     expect(replaced).toBe(0);
-    expect(choices.items[0]).toMatchObject({ drivers: ["faster_sales", "cover_shorter_than_lead_time"], phrase: "selling faster than usual" });
+    expect(choices.overview).toBe("some_running_low");
+    expect(choices.items[0]).toMatchObject({ drivers: ["faster_sales", "cover_shorter_than_lead_time"], note: "pace_picked_up" });
   });
 
   it("drops unknown refs, repeated refs and unknown drivers; ignores invented ones", () => {
-    const { choices } = applyGuardrails(out([{ ref: "I9" }, { ref: "I1", drivers: ["faster_sales", "order_more", "FASTER_SALES"] }, { ref: "I1", phrase: "stock is low" }]), sent());
+    const { choices } = applyGuardrails(run({ items: [itemOut({ ref: "I9" }), itemOut({ drivers: ["faster_sales", "order_more", "FASTER_SALES"] }), itemOut({ note: "running_low" })] }), sent());
     expect(choices.items).toHaveLength(1);
     expect(choices.items[0].drivers).toEqual(["faster_sales"]);
-    expect(choices.items[0].phrase).toBe("");
+    expect(choices.items[0].note).toBe("none");
   });
 
   it("an item whose status differs from the computed one loses all its model choices", () => {
-    const { choices, replaced } = applyGuardrails(out([{ status: "reorder_soon", drivers: ["faster_sales"], phrase: "selling faster than usual" }]), buildModelInput([oatMilk()]).sent);
+    const { choices, replaced } = applyGuardrails(run({ items: [itemOut({ status: "reorder_soon", drivers: ["faster_sales"], note: "pace_picked_up" })] }), buildModelInput([oatMilk()]).sent);
     expect(choices.items).toEqual([]);
     expect(replaced).toBe(1);
   });
@@ -173,27 +186,35 @@ describe("applyGuardrails", () => {
   it("drops drivers that aren't true for the numbers", () => {
     // Coffee: trend 1, cover 6.5 against a 3-day lead time, on hand above the reorder point.
     const s = buildModelInput([suggest24()]).sent;
-    const { choices, replaced } = applyGuardrails(out([{ status: "reorder_soon", drivers: ["faster_sales", "slower_sales", "below_reorder_point", "cover_shorter_than_lead_time", "cover_close_to_lead_time"] }]), s);
+    const { choices, replaced } = applyGuardrails(run({ items: [itemOut({ status: "reorder_soon", drivers: ["faster_sales", "slower_sales", "below_reorder_point", "cover_shorter_than_lead_time", "cover_close_to_lead_time"] })] }), s);
     expect(choices.items[0].drivers).toEqual(["cover_close_to_lead_time"]);
     expect(replaced).toBe(4);
   });
 
-  it("refuses an overview that carries a number or a direction word", () => {
-    expect(applyGuardrails(out([], { overview: "order 500 now" }), sent()).choices.overview).toBe("");
-    expect(applyGuardrails(out([], { overview: "selling faster than usual" }), sent()).choices.overview).toBe("");
-    expect(applyGuardrails(out([], { overview: "stock is running low" }), sent()).choices.overview).toBe("stock is running low");
-  });
-
   it("keeps only known caveat codes, at most three", () => {
-    const { choices } = applyGuardrails(out([], { caveats: ["history_window", "made_up", "no_seasonality", "check_supplier_terms", "history_window"] }), sent());
+    const { choices } = applyGuardrails(run({ items: [], caveats: ["history_window", "made_up", "no_seasonality", "check_supplier_terms", "history_window"] }), sent());
     expect(choices.caveats).toEqual(["history_window", "no_seasonality", "check_supplier_terms"]);
+  });
+});
+
+describe("status and drivers read the same rounded cover", () => {
+  it("cover shown as 4 days against a 4-day lead time is not 'shorter than the lead time'", () => {
+    // 99 on hand at 25 a day is 3.96 days: shown as 4, so neither the status nor the driver says it is under 4.
+    const row = makeRow("Edge", { onHand: 99, reorderPoint: 0, leadTimeDays: 4, sold28: 700, sold7: 175, historyDays: 28 });
+    expect(row.daysOfCover).toBe(4);
+    expect(row.status).toBe("reorder_soon");
+    expect(driverApplies("cover_shorter_than_lead_time", row)).toBe(false);
+    expect(driverApplies("cover_close_to_lead_time", row)).toBe(true);
+    const under = makeRow("Edge2", { onHand: 98, reorderPoint: 0, leadTimeDays: 4, sold28: 700, sold7: 175, historyDays: 28 }); // 3.92 -> 3.9
+    expect(under.status).toBe("reorder_now");
+    expect(driverApplies("cover_shorter_than_lead_time", under)).toBe(true);
   });
 });
 
 describe("renderExplanation", () => {
   it("renders every sentence from the numbers, and uses the template for items the model skipped", () => {
     const rows = [oatMilk(), suggest24()];
-    const { choices } = applyGuardrails(out([{ drivers: ["faster_sales"], phrase: "selling faster than usual" }]), buildModelInput(rows).sent);
+    const { choices } = applyGuardrails(run({ items: [itemOut({ drivers: ["faster_sales"], note: "pace_picked_up" })] }), buildModelInput(rows).sent);
     const e = renderExplanation(rows, choices, false);
     expect(e.items.map((i) => i.source)).toEqual(["model", "template"]);
     expect(e.items[0].text).toBe(
@@ -205,12 +226,22 @@ describe("renderExplanation", () => {
     expect(e.caveats).toEqual(["Forecasts use the last 28 days of sales only."]);
   });
 
+  it("adds a note that no driver sentence already says", () => {
+    const row = withTrend(14);
+    const { choices } = applyGuardrails(run({ items: [itemOut({ drivers: ["below_reorder_point"], note: "steady_pace" })] }), buildModelInput([row]).sent);
+    expect(renderExplanation([row], choices, false).items[0].text).toContain("Sales pace is steady.");
+  });
+
   it("re-checks stored choices, so a stale or tampered row can't put a false claim on the page", () => {
     const row = suggest24();
-    const e = renderExplanation([row], { overview: "order 500", caveats: [], items: [{ itemId: row.itemId, status: "reorder_soon", drivers: ["faster_sales"], phrase: "selling faster than usual" }] }, false);
-    expect(e.items[0].text).not.toMatch(/faster/i);
-    expect(e.overview).not.toContain("500");
+    const e = renderExplanation([row], { overview: "all_need_reorder_now", caveats: [], items: [{ itemId: row.itemId, status: "reorder_soon", drivers: ["faster_sales"], note: "pace_picked_up" }] }, false);
+    expect(e.items[0].text).not.toMatch(/faster|picked up/i);
+    expect(e.overview).not.toContain("needs reordering now");
     expect(e.items[0].source).toBe("template");
+    const e2 = renderExplanation([row], { overview: "none", caveats: [], items: [{ itemId: row.itemId, status: "reorder_soon", drivers: [], note: "steady_pace" }] }, false);
+    expect(e2.items[0].text).toContain("Sales pace is steady."); // trend 1 really is steady
+    const e3 = renderExplanation([row], { overview: "none", caveats: [], items: [{ itemId: row.itemId, status: "reorder_soon", drivers: [], note: "plenty_on_hand" }] }, false);
+    expect(e3.items[0].text).not.toContain("plenty");
   });
 
   it("says 1 day, not 1 days", () => {
@@ -231,16 +262,15 @@ describe("renderExplanation", () => {
 });
 
 describe("schema and demo fixture", () => {
-  it("the demo fixture matches the schema and contains no digits", () => {
+  it("the demo fixture matches the schema and holds only codes", () => {
     const fixture = demoFixtures["reorder-explain"];
     expect(reorderExplainSchema.safeParse(fixture).success).toBe(true);
-    // Refs like "I1" carry a digit by design; everything the model writes must not.
     const { overview, items, caveats } = fixture as ReorderExplainOutput;
-    expect(JSON.stringify([overview, caveats, items.map((i) => [i.status, i.drivers, i.phrase])])).not.toMatch(/\d/);
+    expect(JSON.stringify([overview, caveats, items.map((i) => [i.status, i.drivers, i.note])])).not.toMatch(/\d| /);
   });
 
   it("bounds the output: at most 25 items", () => {
-    const item = { ref: "I1", status: "reorder_now", drivers: [], phrase: "" };
+    const item = itemOut();
     expect(reorderExplainSchema.safeParse({ overview: "", items: Array(26).fill(item), caveats: [] }).success).toBe(false);
     expect(reorderExplainSchema.safeParse({ overview: "", items: [item], caveats: "nonsense" }).data?.caveats).toEqual([]);
     expect(reorderExplainSchema.safeParse({ overview: "", items: [{ ...item, ref: "X1" }], caveats: [] }).success).toBe(false);

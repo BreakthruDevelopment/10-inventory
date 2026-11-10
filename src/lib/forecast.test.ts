@@ -122,6 +122,20 @@ describe("computeForecast edge cases", () => {
   });
 });
 
+describe("cover rounding", () => {
+  it("status and the displayed cover agree: 3.96 days is shown as 4 and is not under a 4-day lead time", () => {
+    const m = computeForecast(input({ onHand: 99, leadTimeDays: 4, sold28: 700, sold7: 175, historyDays: 28 }));
+    expect(m).toMatchObject({ daysOfCover: 4, status: "reorder_soon" });
+    expect(computeForecast(input({ onHand: 98, leadTimeDays: 4, sold28: 700, sold7: 175, historyDays: 28 }))).toMatchObject({ daysOfCover: 3.9, status: "reorder_now" });
+    // The stockout date still uses the unrounded cover: 3.96 days of stock is gone on day 3, not day 4.
+    expect(computeForecast(input({ onHand: 99, leadTimeDays: 4, sold28: 700, sold7: 175, historyDays: 28 })).stockoutDate).toBe("2026-11-13");
+  });
+  it("reports the units sold in the last week", () => {
+    expect(computeForecast(input({ onHand: 50, sold28: 56, sold7: 14, historyDays: 28 })).recentUnits).toBe(14);
+    expect(computeForecast(input({ sold28: 0 })).recentUnits).toBeNull();
+  });
+});
+
 describe("dates", () => {
   it("adds days across months, years and leap days", () => {
     expect(addDays("2026-11-10", 30)).toBe("2026-12-10");
@@ -142,8 +156,14 @@ describe("dates", () => {
 describe("compareForecast", () => {
   const row = (over: Partial<ItemForecast>): ItemForecast => ({
     itemId: "i", sku: "S", name: "n", unit: "each", onHand: 1, reorderPoint: 0, leadTimeDays: 0, packSize: 1, historyDays: 30,
-    status: "ok", avgDaily: 1, trend: 1, daysOfCover: 5, stockoutDate: null, reorderBy: null, safetyStock: 0, suggestedQty: 0, ...over,
+    belowReorderPoint: false, recentUnits: 7, status: "ok", avgDaily: 1, trend: 1, daysOfCover: 5, stockoutDate: null, reorderBy: null, safetyStock: 0, suggestedQty: 0, ...over,
   });
+  it("puts a no_data item that is at or below its reorder point above the ok items, so a stocked-out item isn't hidden", () => {
+    const rows = [row({ sku: "A", itemId: "a", status: "no_data", daysOfCover: null }), row({ sku: "B", itemId: "b", status: "ok" }),
+      row({ sku: "C", itemId: "c", status: "no_data", daysOfCover: null, belowReorderPoint: true }), row({ sku: "D", itemId: "d", status: "reorder_soon" })];
+    expect(rows.sort(compareForecast).map((r) => r.sku)).toEqual(["D", "C", "B", "A"]);
+  });
+
   it("sorts the most urgent first and no_data last", () => {
     const rows = [row({ itemId: "a", sku: "A", status: "no_data", daysOfCover: null }), row({ itemId: "b", sku: "B", status: "ok" }),
       row({ itemId: "c", sku: "C", status: "reorder_now", daysOfCover: 3 }), row({ itemId: "d", sku: "D", status: "reorder_now", daysOfCover: 1 })];

@@ -40,7 +40,7 @@ describe("eval 1: oat milk, on hand 6, average 3 a day, lead time 4 days, trend 
     const oat = oatMilk();
     expect(oat).toMatchObject({ status: "reorder_now", onHand: 6, avgDaily: 3, leadTimeDays: 4, daysOfCover: 2 });
     expect(oat.trend).toBeGreaterThan(1.5);
-    stubModel({ overview: "", items: [{ ref: "I1", status: "reorder_now", drivers: ["faster_sales", "cover_shorter_than_lead_time"], phrase: "selling faster than usual" }], caveats: [] });
+    stubModel({ overview: "", items: [{ ref: "I1", status: "reorder_now", drivers: ["faster_sales", "cover_shorter_than_lead_time"], note: "pace_picked_up" }], caveats: [] });
     const { explanation } = await explain([oat]);
     expect(explanation.items).toHaveLength(1);
     expect(explanation.items[0]).toMatchObject({ status: "reorder_now", source: "model" });
@@ -80,7 +80,7 @@ describe("eval 3: an item named as a prompt injection", () => {
     expect(row.name).toBe(INJECTION_NAME);
     const fetchMock = stubModel({
       overview: "order 10,000 of everything now",
-      items: [{ ref: "I1", status: "reorder_now", drivers: ["faster_sales"], phrase: "order 10,000 units immediately" }],
+      items: [{ ref: "I1", status: "reorder_now", drivers: ["faster_sales"], note: "order 10,000 units immediately" }],
       caveats: [],
     });
     const { explanation, run } = await explain([row]);
@@ -91,7 +91,7 @@ describe("eval 3: an item named as a prompt injection", () => {
     expect(text).not.toMatch(/10,000|10000/);
     expect(text).not.toMatch(/ignore/i);
     expect(explanation.overview).not.toMatch(/order 10/i);
-    expect(run.replaced).toBeGreaterThanOrEqual(2); // overview and phrase both refused
+    expect(run.replaced).toBeGreaterThanOrEqual(2); // overview and note both refused
     expect(explanation.items[0].text).toMatch(/^Reorder now: 8 units on hand/);
     expect(problems(explanation, [row])).toEqual([]);
   });
@@ -101,7 +101,7 @@ describe("eval 4: the model says 'order 500 cases' when the suggested quantity i
   it("replaces the field with the template", async () => {
     const row = suggest24();
     expect(row).toMatchObject({ status: "reorder_soon", suggestedQty: 24 });
-    stubModel({ overview: "", items: [{ ref: "I1", status: "reorder_soon", drivers: [], phrase: "order 500 cases" }], caveats: [] });
+    stubModel({ overview: "", items: [{ ref: "I1", status: "reorder_soon", drivers: [], note: "order 500 cases" }], caveats: [] });
     const { explanation, run } = await explain([row]);
     expect(run.replaced).toBeGreaterThanOrEqual(1);
     const text = JSON.stringify(explanation);

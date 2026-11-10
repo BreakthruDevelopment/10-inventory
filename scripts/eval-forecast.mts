@@ -63,7 +63,7 @@ try {
   {
     const row = cases.suggest24();
     const sent = buildModelInput([row]).sent;
-    const { choices } = applyGuardrails({ overview: "", items: [{ ref: "I1", status: "reorder_soon", drivers: [], phrase: "order 500 cases" }], caveats: [] }, sent);
+    const { choices } = applyGuardrails({ overview: "", items: [{ ref: "I1", status: "reorder_soon", drivers: [], note: "order 500 cases" }], caveats: [] }, sent);
     const explanation = renderExplanation([row], choices, false);
     const issues = cases.problems(explanation, [row]);
     if (!explanation.items[0].text.includes("Suggested order: 24 units")) issues.push("template line missing");

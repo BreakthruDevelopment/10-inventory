@@ -22,6 +22,7 @@ export function makeRow(name: string, over: Partial<ForecastInput> & { unit?: st
     leadTimeDays: base.leadTimeDays,
     packSize: base.packSize,
     historyDays: base.historyDays,
+    belowReorderPoint: base.onHand <= base.reorderPoint,
     ...computeForecast(base),
   };
 }

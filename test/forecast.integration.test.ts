@@ -82,17 +82,23 @@ describe.skipIf(!url)("forecast: numbers, explanation, caps and access (Postgres
     await sale(ws, fresh, 5, 0.5);
     const gone = await makeItem(ws, manager, "GONE", "Archived", {});
     await sale(ws, gone, 30, 2);
+    const fine = await makeItem(ws, manager, "ZFINE", "Plenty", { reorderPoint: 5 });
+    await sql`update item set on_hand = 500 where id = ${fine}`;
+    await sale(ws, fine, 28, 15);
     await sql`update item set archived_at = now() where id = ${gone}`;
     const foreign = await makeItem(foreignWs, outsider, "OAT", "Foreign oat", { reorderPoint: 5, leadTimeDays: 4 });
     await sale(foreignWs, foreign, 400, 1);
 
     const view = await svc.getForecast(manager, ws);
-    expect(view.items.map((i) => i.sku)).toEqual(["OAT", "FRESH", "QUIET"]);
+    // A no_data item at or below its reorder point (FRESH, QUIET) sits above the ok item, so a stocked-out item isn't hidden.
+    expect(view.items.map((i) => i.sku)).toEqual(["OAT", "FRESH", "QUIET", "ZFINE"]);
     const byId = Object.fromEntries(view.items.map((i) => [i.sku, i]));
     expect(byId.OAT).toMatchObject({ status: "reorder_now", avgDaily: 3, trend: 1.62, daysOfCover: 2, onHand: 6, suggestedQty: 54, safetyStock: 6 });
-    expect(byId.QUIET).toMatchObject({ status: "no_data", avgDaily: null });
+    expect(byId.QUIET).toMatchObject({ status: "no_data", avgDaily: null, belowReorderPoint: true });
+    expect(byId.ZFINE).toMatchObject({ status: "ok", belowReorderPoint: false });
+    expect(byId.OAT.belowReorderPoint).toBe(false);
     expect(byId.FRESH).toMatchObject({ status: "no_data", historyDays: 0 });
-    expect(view.counts).toEqual({ reorderNow: 1, reorderSoon: 0, ok: 0, noData: 2 });
+    expect(view.counts).toEqual({ reorderNow: 1, reorderSoon: 0, ok: 1, noData: 2 });
     expect(quiet).toBeTruthy();
     expect(JSON.stringify(view)).not.toContain("Foreign oat");
     expect(view.explanation).toBeNull();
@@ -173,6 +179,13 @@ describe.skipIf(!url)("forecast: numbers, explanation, caps and access (Postgres
     expect(await count("forecast_call")).toBe(0);
     expect(await daily()).toBe(0);
 
+    // The refund removes this request's own row, by id, never someone else's (here: rows newer than the reservation).
+    const others = await sql`insert into forecast_call (workspace_id, at) select ${ws}, now() + interval '1 minute' from generate_series(1, 2) returning id`;
+    await expect(svc.explainForecast(manager, ws)).rejects.toMatchObject({ kind: "provider" });
+    expect((await sql`select id from forecast_call where workspace_id = ${ws}`).map((r) => r.id).sort()).toEqual(others.map((r) => r.id).sort());
+    await sql`delete from forecast_call where workspace_id = ${ws}`;
+
+    // With fallback on, a failing provider is answered from the demo fixture: nothing is thrown, so nothing is refunded.
     setEnv({ AI_PROVIDER: "gemini", GEMINI_API_KEY: "test-key", AI_FALLBACK_TO_DEMO: "true" });
     const result = await svc.explainForecast(manager, ws);
     expect(result.explanation.demo).toBe(true);
@@ -250,6 +263,16 @@ describe.skipIf(!url)("forecast: numbers, explanation, caps and access (Postgres
     expect(Object.keys(explained).sort()).toEqual(["cached", "explanation", "generatedAt"]);
     expect(Object.keys(explained.explanation).sort()).toEqual(["caveats", "demo", "items", "overview"]);
     expect(Object.keys(explained.explanation.items[0]).sort()).toEqual(["itemId", "source", "status", "text"]);
+  });
+
+  it("escapes a formula-looking item name in the reorder CSV", async () => {
+    const id = await makeItem(ws, manager, "FORMULA", "=SUM(1,2)", { reorderPoint: 5 });
+    await sql`update item set on_hand = 0 where id = ${id}`;
+    const text = await (await call(routes.reorder.GET as Handler, "GET", ws)).text();
+    expect(text).toContain(`"'=SUM(1,2)"`);
+    expect(text).not.toMatch(/(^|,)"=SUM/m);
+    // Spreadsheet-significant leading characters are neutralised in the forecast columns too, via the same cell escaper.
+    expect(text.split("\r\n").find((l) => l.startsWith('"FORMULA"'))).toContain('"no_data"');
   });
 
   it("the reorder CSV carries the forecast numbers beside each item", async () => {
