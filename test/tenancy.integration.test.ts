@@ -191,6 +191,44 @@ describe.skipIf(!url)("tenancy (Postgres)", () => {
     }
   });
 
+  describe("database guard (every path, not just removeMember)", () => {
+    const sqlRejects = (p: PromiseLike<unknown>) => expect(p).rejects.toMatchObject({ message: expect.stringContaining("at least one manager") });
+    const managers = async (w: string) => Number((await sql`select count(*) from membership where workspace_id = ${w} and role = 'manager'`)[0].count);
+
+    it("deleting the last manager's account is refused and changes nothing; with a second manager it works", async () => {
+      await sqlRejects(sql`delete from "user" where id = ${alice.id}`);
+      expect((await sql`select 1 from "user" where id = ${alice.id}`).length).toBe(1);
+      expect(await managers(wsA)).toBe(1);
+      await members.changeMemberRole(alice, wsA, bob.id, { role: "manager" });
+      await sql`delete from "user" where id = ${alice.id}`;
+      expect(await managers(wsA)).toBe(1);
+      await makeUsers(sql, ["alice"]); // put her back for the other tests (she is no longer a member of A)
+    });
+
+    it("a direct UPDATE or DELETE of the last manager's membership is refused", async () => {
+      await sqlRejects(sql`update membership set role = 'staff' where workspace_id = ${wsA} and user_id = ${alice.id}`);
+      await sqlRejects(sql`delete from membership where workspace_id = ${wsA} and user_id = ${alice.id}`);
+      await sqlRejects(sql`update membership set workspace_id = ${wsB} where workspace_id = ${wsA} and user_id = ${alice.id}`);
+      expect(await managers(wsA)).toBe(1);
+      await sql`update membership set role = 'manager' where workspace_id = ${wsA} and user_id = ${alice.id}`; // no-op update is fine
+      await sql`update membership set role = 'manager' where workspace_id = ${wsA} and user_id = ${bob.id}`;
+      await sql`update membership set role = 'staff' where workspace_id = ${wsA} and user_id = ${alice.id}`;
+    });
+
+    it("two managers' accounts deleted at once leave one manager", async () => {
+      await members.changeMemberRole(alice, wsA, bob.id, { role: "manager" });
+      const results = await Promise.allSettled([sql`delete from "user" where id = ${alice.id}`, sql`delete from "user" where id = ${bob.id}`]);
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect(await managers(wsA)).toBe(1);
+      await makeUsers(sql, ["alice", "bob"]);
+    });
+
+    it("deleting a whole workspace is not blocked by the rule", async () => {
+      await sql`delete from workspace where id = ${wsA}`;
+      expect((await sql`select 1 from membership where workspace_id = ${wsA}`).length).toBe(0);
+    });
+  });
+
   describe("invites", () => {
     const sha = (t: string) => createHash("sha256").update(t).digest("hex");
 

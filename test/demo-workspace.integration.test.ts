@@ -78,6 +78,17 @@ describe.skipIf(!url)("demo workspace (Postgres, Better Auth)", () => {
     expect((await demoState()).workspaces).toHaveLength(0);
   });
 
+  it("the CLI loads the demo with a single-connection pool (DB_POOL_MAX=1) and doesn't hang", () => {
+    const child = spawnSync(process.execPath, tsxArgs, {
+      env: { ...process.env, ...base, DATABASE_URL: url!, DB_POOL_MAX: "1" },
+      encoding: "utf8",
+      timeout: 60000,
+    });
+    expect(child.stderr).toBe("");
+    expect(child.status).toBe(0);
+    expect(child.stdout).toContain("Loaded 3 demo users");
+  });
+
   it("creates one workspace with one manager and two staff, all marked as demo accounts", async () => {
     expect(await loader.loadDemoWorkspace(admin, { mode: "admin" })).toEqual({ users: 3, workspaces: 1, members: 3 });
     const s = await demoState();
@@ -114,6 +125,14 @@ describe.skipIf(!url)("demo workspace (Postgres, Better Auth)", () => {
     await sql`delete from daily_usage where kind = 'demo_load'`;
     await loader.loadDemoWorkspace(admin, { mode: "admin" }, { reserve: true });
     await expect(loader.loadDemoWorkspace(admin, { mode: "admin" }, { reserve: true })).rejects.toMatchObject({ status: 429 });
+    // A load that fails after reserving gives the reservation back.
+    await sql`delete from rate_event where kind = 'demo_load'`;
+    await sql`delete from daily_usage where kind = 'demo_load'`;
+    await sql`update "user" set image = null where email = 'jo@demo.breakthru.test'`;
+    await expect(loader.loadDemoWorkspace(admin, { mode: "admin" }, { reserve: true })).rejects.toMatchObject({ status: 409 });
+    expect(Number((await sql`select count(*) from rate_event where kind = 'demo_load'`)[0].count)).toBe(0);
+    expect(Number((await sql`select coalesce(sum(count), 0) as n from daily_usage where kind = 'demo_load'`)[0].n)).toBe(0);
+    await sql`update "user" set image = 'urn:breakthru:inventory-demo:v1' where email = 'jo@demo.breakthru.test'`;
   });
 
   it("public sign-up can't take a demo address or the demo marker", async () => {

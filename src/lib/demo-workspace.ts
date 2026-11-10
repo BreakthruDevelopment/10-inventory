@@ -10,7 +10,7 @@ import { demoSeedConfig } from "@/lib/demo-seed-config";
 import { DEMO_LOADS_PER_DAY } from "@/lib/domain";
 import { ConflictError, TooManyRequestsError } from "@/lib/errors";
 import { log } from "@/lib/log";
-import { reserveDaily } from "@/lib/usage";
+import { releaseDaily, releaseRate, reserveDaily } from "@/lib/usage";
 
 export { DEMO_LOADS_PER_DAY };
 
@@ -48,6 +48,10 @@ export type DemoLoadResult = { users: number; workspaces: number; members: numbe
 /**
  * Admin-only. Default is the safe admin-route mode; CLI mode re-checks the production guards in `demoSeedConfig()`.
  * Replaces exactly the demo users' own workspaces (found through the marker-checked accounts, never by name).
+ *
+ * No transaction is held while Better Auth works (it uses its own pooled connections, so holding one here would hang
+ * with `DB_POOL_MAX=1`). Order: reserve the load (short transaction under the load lock), prepare the three accounts,
+ * then replace the workspace in one short transaction under the same lock. A failure after the reservation refunds it.
  */
 export async function loadDemoWorkspace(
   actor: Actor,
@@ -56,20 +60,46 @@ export async function loadDemoWorkspace(
 ): Promise<DemoLoadResult> {
   assertCan(actor, "delete");
   const parsed = optionsSchema.parse(options);
-  return db().transaction(async (tx) => {
-    const [{ ok }] = await tryLock(tx);
-    if (!ok) throw new TooManyRequestsError("A demo load is already running. Try again shortly.");
-    if (reserve) {
+  if (reserve) {
+    await db().transaction(async (tx) => {
+      await takeLock(tx);
       await reserveLocked(tx, actor);
-      log.info("admin.demo_load", { by: actor.id });
-    }
-    const result = await loadLocked(actor, parsed.mode);
+    });
+    log.info("admin.demo_load", { by: actor.id });
+  }
+  try {
+    const ids = await prepareAccounts(actor, parsed.mode);
+    const result = await db().transaction(async (tx) => {
+      await takeLock(tx);
+      return replaceWorkspace(tx, ids);
+    });
     log.info("demo.loaded", { by: actor.id, mode: parsed.mode, ...result });
     return result;
-  });
+  } catch (err) {
+    if (reserve) await refund(actor);
+    throw err;
+  }
 }
 
-async function loadLocked(actor: Actor, mode: "admin" | "cli"): Promise<DemoLoadResult> {
+async function takeLock(tx: Tx): Promise<void> {
+  const [{ ok }] = await tryLock(tx);
+  if (!ok) throw new TooManyRequestsError("A demo load is already running. Try again shortly.");
+}
+
+/** Give back a reservation whose load never happened. Best effort: a refund failure must not hide the real error. */
+async function refund(actor: Actor): Promise<void> {
+  try {
+    await db().transaction(async (tx) => {
+      await releaseRate(tx, actor.id, "demo_load");
+      await releaseDaily(tx, "demo_load");
+    });
+  } catch (err) {
+    log.error("demo.refund_failed", { errorName: err instanceof Error ? err.name : typeof err });
+  }
+}
+
+/** Check every identity, then create or reset the three accounts. Returns their ids by name. */
+async function prepareAccounts(actor: Actor, mode: "admin" | "cli"): Promise<Map<string, string>> {
   const password = mode === "cli" ? demoSeedConfig().password : undefined;
   const api = auth();
   const ctx = await api.$context;
@@ -97,15 +127,19 @@ async function loadLocked(actor: Actor, mode: "admin" | "cli"): Promise<DemoLoad
       ids.set(p.name, created.user.id);
     }
   }
-  const all = [...ids.values()];
+  return ids;
+}
 
-  await db().transaction(async (tx) => {
-    const { rateEvent, workspace, membership } = schema;
-    await tx.delete(rateEvent).where(and(inArray(rateEvent.userId, all), sql`${rateEvent.kind} <> 'demo_load'`));
-    // Memberships and invites cascade with the workspace.
-    await tx.delete(workspace).where(inArray(workspace.createdBy, all));
-    const [ws] = await tx.insert(workspace).values({ name: DEMO_WORKSPACE_NAME, timeZone: "America/Denver", createdBy: ids.get("Maya")! }).returning({ id: workspace.id });
-    await tx.insert(membership).values(PEOPLE.map((p) => ({ workspaceId: ws.id, userId: ids.get(p.name)!, role: p.role })));
-  });
+async function replaceWorkspace(tx: Tx, ids: Map<string, string>): Promise<DemoLoadResult> {
+  const all = [...ids.values()];
+  const { rateEvent, workspace, membership } = schema;
+  await tx.delete(rateEvent).where(and(inArray(rateEvent.userId, all), sql`${rateEvent.kind} <> 'demo_load'`));
+  // Memberships and invites cascade with the workspace.
+  await tx.delete(workspace).where(inArray(workspace.createdBy, all));
+  const [ws] = await tx
+    .insert(workspace)
+    .values({ name: DEMO_WORKSPACE_NAME, timeZone: "America/Denver", createdBy: ids.get("Maya")! })
+    .returning({ id: workspace.id });
+  await tx.insert(membership).values(PEOPLE.map((p) => ({ workspaceId: ws.id, userId: ids.get(p.name)!, role: p.role })));
   return { users: PEOPLE.length, workspaces: 1, members: PEOPLE.length };
 }
