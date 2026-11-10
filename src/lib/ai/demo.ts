@@ -11,6 +11,15 @@ export const demoFixtures: Record<string, unknown> = {
       "You have a few open items. The most recent ones focus on setup work; nothing looks overdue.",
     highlights: ["Setup tasks are the largest group", "No items are flagged urgent"],
   },
+  // Structured codes only (no text, no numbers): the server renders the text from the computed forecast.
+  // If I1's computed status or trend doesn't match, the status, driver and note guardrails drop these codes and the template stands, so a demo answer can never say something the numbers don't.
+  "reorder-explain": {
+    overview: "",
+    items: [
+      { ref: "I1", status: "reorder_now", drivers: ["faster_sales", "cover_shorter_than_lead_time"], note: "pace_picked_up" },
+    ],
+    caveats: ["history_window", "no_seasonality"],
+  },
 };
 
 /**
