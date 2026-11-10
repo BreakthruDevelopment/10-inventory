@@ -8,8 +8,8 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 RUN_ID="$(date +%s)$RANDOM"
-JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_C="$(mktemp)"
-trap 'rm -f "$JAR_A" "$JAR_B" "$JAR_C"' EXIT
+JAR_A="$(mktemp)"; JAR_B="$(mktemp)"; JAR_C="$(mktemp)"; SCAN_HTML="$(mktemp)"
+trap 'rm -f "$JAR_A" "$JAR_B" "$JAR_C" "$SCAN_HTML"' EXIT
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -81,15 +81,30 @@ ws=$(send "$JAR_A" POST /api/workspaces '{"name":"Smoke Corner Store"}' | field 
 expect "creator's role" manager "$(send "$JAR_A" GET "/api/w/$ws" | field workspace.role)"
 pass "user A created a workspace and is its manager"
 
+expect "signed-out scan page" 307 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/w/$ws/scan")"
+expect "outsider scan page" 404 "$(status "$JAR_B" GET "/w/$ws/scan")"
+scan_headers=$(curl -sD - -o "$SCAN_HTML" -b "$JAR_A" "$BASE_URL/w/$ws/scan") || fail "scan page did not render"
+grep -q 'Manual code' "$SCAN_HTML" || fail "scan page missing manual entry"
+grep -q 'h-14' "$SCAN_HTML" || fail "scan page missing a 56px action control"
+grep -q 'Explore breakthruventures.ai' "$SCAN_HTML" || fail "scan page missing the shared footer"
+printf '%s' "$scan_headers" | tr -d '\r' | grep -iq '^permissions-policy:.*camera=(self)' || fail "scan page missing Permissions-Policy: camera=(self)"
+ws_html=$(curl -fsS -b "$JAR_A" "$BASE_URL/w/$ws") || fail "workspace page did not render"
+printf '%s' "$ws_html" | grep -q "/w/$ws/scan" || fail "workspace page missing the scan link"
+expect "scanner test is dev-only" 404 "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" "$BASE_URL/scanner-test")"
+pass "scan screen, manual entry and camera Permissions-Policy"
+
 uuid() { node -e 'console.log(require("node:crypto").randomUUID())'; }
 item=$(send "$JAR_A" POST "/api/w/$ws/items" '{"sku":"SMOKE-OAT","name":"Smoke oat milk","barcode":"4006381333931","reorderPoint":8}' | field item.id)
 expect "barcode lookup" "$item" "$(send "$JAR_A" GET "/api/w/$ws/lookup?code=4006381333931" | field item.id)"
-expect "receive 10" 10 "$(send "$JAR_A" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"receive\",\"qty\":10,\"clientOpId\":\"$(uuid)\"}" | field movement.onHandAfter)"
+# Build these bodies outside "$(...)" so bash does not brace-expand the JSON.
+receive_body=$(printf '{"itemId":"%s","kind":"receive","qty":10,"clientOpId":"%s"}' "$item" "$(uuid)")
+expect "receive 10" 10 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$receive_body" | field movement.onHandAfter)"
 op=$(uuid)
-sale="{\"itemId\":\"$item\",\"kind\":\"sale\",\"qty\":3,\"clientOpId\":\"$op\"}"
+sale=$(printf '{"itemId":"%s","kind":"sale","qty":3,"clientOpId":"%s"}' "$item" "$op")
 expect "sell 3" 7 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$sale" | field movement.onHandAfter)"
 expect "retry sale" 7 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$sale" | field movement.onHandAfter)"
-expect "stale count" 409 "$(status "$JAR_A" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"count\",\"qty\":10,\"expectedVersion\":2,\"clientOpId\":\"$(uuid)\"}")"
+count_body=$(printf '{"itemId":"%s","kind":"count","qty":10,"expectedVersion":2,"clientOpId":"%s"}' "$item" "$(uuid)")
+expect "stale count" 409 "$(status "$JAR_A" POST "/api/w/$ws/movements" "$count_body")"
 expect "ledger reconciles" true "$(send "$JAR_A" GET "/api/w/$ws/items/$item" | field item.ledgerMatches)"
 expect "two ledger entries after retry" 2 "$(send "$JAR_A" GET "/api/w/$ws/items/$item" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).item.movements.length))')"
 expect "B cannot read item" 404 "$(status "$JAR_B" GET "/api/w/$ws/items/$item")"
@@ -136,7 +151,9 @@ expect "invite list is hidden from staff" 403 "$(status "$JAR_B" GET "/api/w/$ws
 expect "staff can't create invites" 403 "$(status "$JAR_B" POST "/api/w/$ws/invites" '{"role":"staff"}')"
 expect "staff can't list members" 403 "$(status "$JAR_B" GET "/api/w/$ws/members")"
 pass "user B joined as staff once; staff can't invite or list members (403)"
-expect "staff can sell" 6 "$(send "$JAR_B" POST "/api/w/$ws/movements" "{\"itemId\":\"$item\",\"kind\":\"sale\",\"qty\":1,\"clientOpId\":\"$(uuid)\"}" | field movement.onHandAfter)"
+expect "staff scan page" 200 "$(status "$JAR_B" GET "/w/$ws/scan")"
+staff_sale=$(printf '{"itemId":"%s","kind":"sale","qty":1,"clientOpId":"%s"}' "$item" "$(uuid)")
+expect "staff can sell" 6 "$(send "$JAR_B" POST "/api/w/$ws/movements" "$staff_sale" | field movement.onHandAfter)"
 expect "staff cannot edit item" 403 "$(status "$JAR_B" PATCH "/api/w/$ws/items/$item" '{"version":4,"name":"Forbidden"}')"
 expect "staff cannot export" 403 "$(status "$JAR_B" GET "/api/w/$ws/export/items.csv")"
 expect "staff cannot read the forecast" 403 "$(status "$JAR_B" GET "/api/w/$ws/forecast")"
