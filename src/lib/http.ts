@@ -21,6 +21,9 @@ export function errorInfo(err: unknown): ErrorInfo {
       },
     };
   }
+  if (isLastManagerViolation(err)) {
+    return { status: 409, body: { error: "A workspace needs at least one manager." } };
+  }
   if (err instanceof AiError) {
     const status = err.kind === "input_rejected" ? 400 : err.kind === "quota" ? 429 : 502;
     return { status, body: { error: err.message } };
@@ -28,6 +31,15 @@ export function errorInfo(err: unknown): ErrorInfo {
   // Never log `err.message` here: database errors embed the query parameters (emails, note text, keys).
   log.error("request.failed", safeErrorFields(err));
   return { status: 500, body: { error: "Something went wrong" } };
+}
+
+/** The database trigger from migration 0004 (SQLSTATE 23514, constraint `membership_last_manager`), possibly wrapped by Drizzle. */
+function isLastManagerViolation(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && typeof e === "object" && depth < 4; e = (e as { cause?: unknown }).cause, depth++) {
+    const x = e as { code?: unknown; constraint_name?: unknown; constraint?: unknown };
+    if (x.code === "23514" && (x.constraint_name === "membership_last_manager" || x.constraint === "membership_last_manager")) return true;
+  }
+  return false;
 }
 
 export function errorResponse(err: unknown): Response {

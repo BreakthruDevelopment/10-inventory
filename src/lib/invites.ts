@@ -4,6 +4,7 @@ import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "@/lib/db";
 import {
+  API_WRITES_PER_HOUR,
   INVITES_PER_WORKSPACE_PER_DAY,
   INVITE_ACCEPTS_PER_HOUR,
   INVITE_TTL_DAYS,
@@ -40,6 +41,7 @@ const openInvite = (workspaceId: string) => {
 export async function createInvite(actor: { id: string }, workspaceId: string, input: unknown) {
   const data = newInviteInput.parse(input ?? {});
   return withWorkspace(actor, workspaceId, "manager", async (tx, me) => {
+    await consumeRate(tx, actor.id, "api_write", API_WRITES_PER_HOUR, "Too many changes. Try again in a little while.");
     const { invite } = schema;
     const [{ open }] = await tx.select({ open: count() }).from(invite).where(openInvite(me.workspaceId));
     if (open >= MAX_OPEN_INVITES) throw new ConflictError(`A workspace can have ${MAX_OPEN_INVITES} open invites. Revoke one first.`);
@@ -96,6 +98,7 @@ export async function revokeInvite(actor: { id: string }, workspaceId: string, i
     throw new NotFoundError();
   }
   await withWorkspace(actor, workspaceId, "manager", async (tx, me) => {
+    await consumeRate(tx, actor.id, "api_write", API_WRITES_PER_HOUR, "Too many changes. Try again in a little while.");
     const { invite } = schema;
     const where = and(eq(invite.id, id.data), eq(invite.workspaceId, me.workspaceId));
     const [row] = await tx.select({ usedAt: invite.usedAt, revokedAt: invite.revokedAt }).from(invite).where(where);

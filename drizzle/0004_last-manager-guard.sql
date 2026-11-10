@@ -1,6 +1,10 @@
 -- A workspace always keeps at least one manager, whoever deletes the row: removeMember(), a direct UPDATE, or the
 -- cascade from deleting the manager's account (admin "remove user"). The app code checks the same rule first to
 -- answer with a friendly 409; this trigger is the backstop that holds for every other path.
+-- Lock ordering: the trigger takes the workspace row lock (FOR UPDATE) per membership row it removes. Application code
+-- (withWorkspace, account-removal.ts) takes workspace locks first, in id order, so it doesn't deadlock with itself.
+-- Two concurrent deletions of accounts that manage the same workspaces in a different order could still deadlock in
+-- this backstop path; Postgres aborts one of them and the caller can retry. That is acceptable for a rare admin action.
 CREATE FUNCTION membership_keep_a_manager() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF OLD.role <> 'manager' THEN

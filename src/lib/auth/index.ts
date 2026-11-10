@@ -5,6 +5,7 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
 import { admin } from "better-auth/plugins";
 import { db, schema } from "@/lib/db";
+import { prepareUserRemoval } from "@/lib/account-removal";
 import { isDemoEmail, MARKER } from "@/lib/demo-identity";
 import { env } from "@/lib/env";
 import { ac, DISABLED_AUTH_PATHS, roles } from "./permissions";
@@ -58,6 +59,8 @@ function createAuth() {
       user: {
         create: { before: async (user, ctx) => void rejectDemoIdentity(user, ctx) },
         update: { before: async (data, ctx) => void rejectDemoIdentity(data, ctx) },
+        // Deleting an account must not orphan a workspace (see account-removal.ts).
+        delete: { before: async (user) => void (await prepareUserRemoval(user.id)) },
       },
     },
     plugins: [

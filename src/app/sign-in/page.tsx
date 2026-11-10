@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { PageIntro, Panel } from "@/components/ui";
 import { SignInForm } from "./sign-in-form";
 
-export const metadata: Metadata = { title: "Sign in" };
+export const metadata: Metadata = { title: "Sign in", referrer: "no-referrer" };
 
 /** Only our own invite links are valid sign-in destinations; anything else falls back to the workspace list. */
 function safeNext(value: string | string[] | undefined): string {

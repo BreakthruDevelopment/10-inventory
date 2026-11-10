@@ -1,3 +1,6 @@
+-- Intentional, because the app is not live yet and nothing here holds real data: this drops the template's example
+-- "item" table (the real inventory "item" table arrives with issue 10.2) and deletes any rate_event rows whose kind is
+-- no longer allowed (the template's "upload") before the new CHECK constraint is added.
 CREATE TABLE "invite" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"workspace_id" uuid NOT NULL,
