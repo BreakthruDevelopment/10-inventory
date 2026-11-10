@@ -1,5 +1,6 @@
 import "server-only";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { hashPassword } from "better-auth/crypto";
 import { and, count, eq, gt, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
@@ -21,6 +22,9 @@ const PEOPLE = [
   { name: "Sam", role: "staff" },
   { name: "Jo", role: "staff" },
 ] as const;
+/** Postgres unique violation, possibly wrapped by Drizzle (`cause`). */
+const isUniqueViolation = (e: unknown): boolean =>
+  typeof e === "object" && e !== null && ((e as { code?: unknown }).code === "23505" || isUniqueViolation((e as { cause?: unknown }).cause));
 const emailFor = (name: string) => `${name.toLowerCase()}@${DEMO_EMAIL_DOMAIN}`;
 const optionsSchema = z.discriminatedUnion("mode", [z.object({ mode: z.literal("admin") }).strict(), z.object({ mode: z.literal("cli") }).strict()]);
 
@@ -101,8 +105,7 @@ async function refund(actor: Actor): Promise<void> {
 /** Check every identity, then create or reset the three accounts. Returns their ids by name. */
 async function prepareAccounts(actor: Actor, mode: "admin" | "cli"): Promise<Map<string, string>> {
   const password = mode === "cli" ? demoSeedConfig().password : undefined;
-  const api = auth();
-  const ctx = await api.$context;
+  const ctx = await auth().$context;
 
   // Preflight every identity before changing anything: an unrelated account at a demo address is never adopted.
   for (const p of PEOPLE) {
@@ -123,8 +126,19 @@ async function prepareAccounts(actor: Actor, mode: "admin" | "cli"): Promise<Map
       await ctx.internalAdapter.deleteUserSessions(existing.id);
       ids.set(p.name, existing.id);
     } else {
-      const created = await api.api.createUser({ body: { email, name: p.name, password: secret, role: "user", data: { image: MARKER } } });
-      ids.set(p.name, created.user.id);
+      // Written with Drizzle, not Better Auth: the auth hooks refuse demo emails and marker images.
+      const id = randomUUID();
+      try {
+        await db().transaction(async (tx) => {
+          await tx.insert(schema.user).values({ id, email, name: p.name, role: "user", image: MARKER });
+          await tx.insert(schema.account).values({ id: randomUUID(), accountId: id, providerId: "credential", userId: id, password: await hashPassword(secret) });
+        });
+      } catch (e) {
+        // A real account took the demo email since the preflight: report a conflict, not a crash.
+        if (isUniqueViolation(e)) throw new ConflictError("A demo email belongs to an unrelated account; no demo data was replaced.");
+        throw e;
+      }
+      ids.set(p.name, id);
     }
   }
   return ids;
