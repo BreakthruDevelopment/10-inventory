@@ -1,7 +1,7 @@
 import { BarcodeFormat } from "@zxing/browser";
 import { describe, expect, it } from "vitest";
 import { CAMERA_COPY, classifyCameraError, releasePreview, stopMediaStream, torchAvailable } from "./camera";
-import { countConflictMessage, notFoundMessage } from "./conflict-copy";
+import { countConflictMessage, notFoundMessage } from "@/app/w/[id]/items/conflict-copy";
 import { SCAN_FORMATS, ZXING_FORMAT_KEYS, zxingFormats } from "./formats";
 import { parseWholeQty } from "./qty";
 

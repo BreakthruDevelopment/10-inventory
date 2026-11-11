@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useId, useRef, useState } from "react";
 import { BarcodeScanner } from "@/components/scanner";
-import { countConflictMessage, notFoundMessage } from "@/components/scanner/conflict-copy";
+import { countConflictMessage, notFoundMessage } from "../items/conflict-copy";
 import { parseWholeQty, qtyError, savedMessage, type StockKind } from "@/components/scanner/qty";
 import { scanPrimary, scanSecondary, stepButton } from "@/components/scanner/styles";
 import { inputClass, labelClass } from "@/components/ui/styles";

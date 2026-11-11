@@ -4,6 +4,7 @@ import { PageIntro } from "@/components/ui";
 import { requireUserOrRedirect } from "@/lib/auth/session";
 import { NotFoundError } from "@/lib/errors";
 import { getWorkspace } from "@/lib/workspaces";
+import { WorkspaceChrome } from "../workspace-chrome";
 import { ScanScreen } from "./scan-screen";
 
 export const metadata: Metadata = { title: "Scan", robots: { index: false } };
@@ -17,13 +18,13 @@ export default async function ScanPage({ params }: PageProps<"/w/[id]/scan">) {
     throw err;
   });
   return (
-    <>
+    <WorkspaceChrome id={workspace.id}>
       <PageIntro
         section="Scan"
         title="Scan"
         description="Point the rear camera at a barcode, or type the code. Nothing from the camera leaves this phone."
       />
       <ScanScreen workspaceId={workspace.id} workspaceName={workspace.name} canCreate={workspace.role === "manager"} />
-    </>
+    </WorkspaceChrome>
   );
 }

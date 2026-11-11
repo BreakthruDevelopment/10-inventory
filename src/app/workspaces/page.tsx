@@ -25,6 +25,7 @@ export default async function WorkspacesPage() {
       ),
     },
     { key: "role", header: "Your role", cell: (w) => (w.role === "manager" ? "Manager" : "Staff") },
+    { key: "zone", header: "Time zone", className: "font-mono text-sm", cell: (w) => <span className="font-mono break-all">{w.timeZone}</span> },
   ];
   return (
     <>

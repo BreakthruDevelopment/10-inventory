@@ -2,7 +2,7 @@
 # End-to-end smoke test against a running app (local, CI, or a deployed URL).
 # Signs up three users over HTTP and proves workspace isolation: one team never sees another's, staff can't do
 # manager things, invite links are single use and revocable, and the last manager can't leave.
-# Later issues add the items, stock and forecast flow (create an item, receive 10, sell 3, stale count, forecast).
+# The same run checks the stock pages: dashboard, items, item detail, forecast and team.
 #   BASE_URL=https://app10.breakthruventures.ai ./scripts/smoke.sh
 set -euo pipefail
 
@@ -60,6 +60,15 @@ field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v
 expect() { # what expected actual
   [ "$2" = "$3" ] || fail "$1: expected $2, got $3"
 }
+page() { # jar path: HTML of a signed-in page
+  curl -fsS -b "$1" "$BASE_URL$2" || fail "page $2 did not render"
+}
+has() { # html needle what
+  echo "$1" | grep -q -F "$2" || fail "$3"
+}
+lacks() { # html needle what
+  if echo "$1" | grep -q -F "$2"; then fail "$3"; fi
+}
 
 expect "anonymous workspace list" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/workspaces")"
 pass "anonymous access refused"
@@ -96,15 +105,15 @@ pass "scan screen, manual entry and camera Permissions-Policy"
 uuid() { node -e 'console.log(require("node:crypto").randomUUID())'; }
 item=$(send "$JAR_A" POST "/api/w/$ws/items" '{"sku":"SMOKE-OAT","name":"Smoke oat milk","barcode":"4006381333931","reorderPoint":8}' | field item.id)
 expect "barcode lookup" "$item" "$(send "$JAR_A" GET "/api/w/$ws/lookup?code=4006381333931" | field item.id)"
-# Build these bodies outside "$(...)" so bash does not brace-expand the JSON.
-receive_body=$(printf '{"itemId":"%s","kind":"receive","qty":10,"clientOpId":"%s"}' "$item" "$(uuid)")
-expect "receive 10" 10 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$receive_body" | field movement.onHandAfter)"
+# Bash 3.2 brace-expands {a,b} inside a double-quoted "$(...)", so the JSON is built on its own line first.
+receive="{\"itemId\":\"$item\",\"kind\":\"receive\",\"qty\":10,\"clientOpId\":\"$(uuid)\"}"
+expect "receive 10" 10 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$receive" | field movement.onHandAfter)"
 op=$(uuid)
 sale=$(printf '{"itemId":"%s","kind":"sale","qty":3,"clientOpId":"%s"}' "$item" "$op")
 expect "sell 3" 7 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$sale" | field movement.onHandAfter)"
 expect "retry sale" 7 "$(send "$JAR_A" POST "/api/w/$ws/movements" "$sale" | field movement.onHandAfter)"
-count_body=$(printf '{"itemId":"%s","kind":"count","qty":10,"expectedVersion":2,"clientOpId":"%s"}' "$item" "$(uuid)")
-expect "stale count" 409 "$(status "$JAR_A" POST "/api/w/$ws/movements" "$count_body")"
+stale="{\"itemId\":\"$item\",\"kind\":\"count\",\"qty\":10,\"expectedVersion\":2,\"clientOpId\":\"$(uuid)\"}"
+expect "stale count" 409 "$(status "$JAR_A" POST "/api/w/$ws/movements" "$stale")"
 expect "ledger reconciles" true "$(send "$JAR_A" GET "/api/w/$ws/items/$item" | field item.ledgerMatches)"
 expect "two ledger entries after retry" 2 "$(send "$JAR_A" GET "/api/w/$ws/items/$item" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).item.movements.length))')"
 expect "B cannot read item" 404 "$(status "$JAR_B" GET "/api/w/$ws/items/$item")"
@@ -152,13 +161,53 @@ expect "staff can't create invites" 403 "$(status "$JAR_B" POST "/api/w/$ws/invi
 expect "staff can't list members" 403 "$(status "$JAR_B" GET "/api/w/$ws/members")"
 pass "user B joined as staff once; staff can't invite or list members (403)"
 expect "staff scan page" 200 "$(status "$JAR_B" GET "/w/$ws/scan")"
-staff_sale=$(printf '{"itemId":"%s","kind":"sale","qty":1,"clientOpId":"%s"}' "$item" "$(uuid)")
+staff_sale="{\"itemId\":\"$item\",\"kind\":\"sale\",\"qty\":1,\"clientOpId\":\"$(uuid)\"}"
 expect "staff can sell" 6 "$(send "$JAR_B" POST "/api/w/$ws/movements" "$staff_sale" | field movement.onHandAfter)"
 expect "staff cannot edit item" 403 "$(status "$JAR_B" PATCH "/api/w/$ws/items/$item" '{"version":4,"name":"Forbidden"}')"
 expect "staff cannot export" 403 "$(status "$JAR_B" GET "/api/w/$ws/export/items.csv")"
 expect "staff cannot read the forecast" 403 "$(status "$JAR_B" GET "/api/w/$ws/forecast")"
 expect "staff cannot ask for an explanation" 403 "$(status "$JAR_B" POST "/api/w/$ws/forecast/explain")"
 pass "staff stock permissions"
+
+for path in "/w/$ws" "/w/$ws/items" "/w/$ws/items/$item" "/w/$ws/forecast" "/w/$ws/team"; do
+  expect "signed-out $path" 307 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")"
+done
+pass "signed-out stock pages redirect"
+
+dash=$(page "$JAR_A" "/w/$ws")
+has "$dash" "Smoke Corner Store" "dashboard shows the workspace"
+has "$dash" "Scan" "dashboard shows Scan"
+has "$dash" "Low stock" "dashboard shows low stock"
+has "$dash" "Smoke oat milk" "dashboard lists the low item"
+has "$dash" "Recent movements" "dashboard shows recent movements"
+items_html=$(page "$JAR_A" "/w/$ws/items?q=oat")
+has "$items_html" "Smoke oat milk" "items search finds the oat milk"
+has "$items_html" "Create item" "manager can create an item"
+empty_html=$(page "$JAR_A" "/w/$ws/items?q=zzzz-no-such-item")
+has "$empty_html" "No items match that search." "items search empty state"
+detail=$(page "$JAR_A" "/w/$ws/items/$item")
+has "$detail" "Ledger matches" "item page shows the ledger check"
+has "$detail" "Receive" "item page can receive stock"
+has "$detail" "Count" "item page can count stock"
+forecast_html=$(page "$JAR_A" "/w/$ws/forecast")
+has "$forecast_html" "No data" "forecast shows no data for a new item"
+has "$forecast_html" "At reorder point" "forecast flags a no-data item at its reorder point"
+has "$forecast_html" "Explain in plain language" "forecast can ask for an explanation"
+has "$forecast_html" "Download reorder list (CSV)" "forecast links the reorder CSV"
+team_html=$(page "$JAR_A" "/w/$ws/team")
+has "$team_html" "Create invite link" "team page can make an invite"
+has "$team_html" "smoke-b-$RUN_ID@example.test" "team page lists the staff member"
+staff_items=$(page "$JAR_B" "/w/$ws/items")
+lacks "$staff_items" "Create item" "staff do not see create item"
+staff_detail=$(page "$JAR_B" "/w/$ws/items/$item")
+has "$staff_detail" "Sell" "staff can record a sale from the item page"
+lacks "$staff_detail" "Archive item" "staff do not see archive"
+staff_forecast=$(page "$JAR_B" "/w/$ws/forecast")
+has "$staff_forecast" "Only managers can open this page." "staff forecast is manager-only"
+lacks "$staff_forecast" "Download reorder list (CSV)" "staff do not see the reorder download"
+staff_team=$(page "$JAR_B" "/w/$ws/team")
+has "$staff_team" "Only managers can open this page." "staff team is manager-only"
+pass "stock, forecast and team pages render"
 
 
 expect "C with a used link" 404 "$(status "$JAR_C" POST "/api/join/$token")"
