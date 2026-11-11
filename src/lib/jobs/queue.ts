@@ -56,8 +56,6 @@ export type EnqueueInput = z.input<typeof enqueueSchema>;
 
 const ACTIVE_KEYED = sql`${job.status} in ('queued', 'running') and ${job.key} is not null`;
 const secs = (ms: number) => sql`make_interval(secs => ${ms / 1000})`;
-// `run_after` is timestamp(3). A bare now() can round up to 1ms in the future, so a job enqueued for "now" is not due yet.
-const dueNow = sql`date_trunc('milliseconds', clock_timestamp())`;
 
 /**
  * Add a job unless one with the same (kind, key) is already queued or running; then return that one.
@@ -74,7 +72,7 @@ export async function enqueue(tx: Handle, input: EnqueueInput): Promise<{ id: st
         ownerId: v.ownerId ?? null,
         payload: v.payload,
         maxAttempts: v.maxAttempts,
-        runAfter: sql`${dueNow} + ${secs(v.delayMs)}`,
+        runAfter: sql`now() + ${secs(v.delayMs)}`,
       })
       .onConflictDoNothing({ target: [job.kind, job.key], where: ACTIVE_KEYED })
       .returning({ id: job.id });
@@ -216,7 +214,7 @@ export async function fail(tx: Handle, j: ClaimedJob, opts: FailOptions): Promis
       status: next,
       attempts: deferred ? Math.max(j.attempts - 1, 0) : j.attempts,
       deferrals: deferred ? sql`${job.deferrals} + 1` : sql`${job.deferrals}`,
-      runAfter: exhausted ? sql`${job.runAfter}` : sql`${dueNow} + ${secs(delay)}`,
+      runAfter: exhausted ? sql`${job.runAfter}` : sql`now() + ${secs(delay)}`,
       lastError: code,
       lockedUntil: null,
       lockToken: null,
@@ -260,7 +258,7 @@ export async function retryJob(
   if (target.status !== "failed") return "not_found";
   try {
     const rows = await tx.execute(sql`
-      update job set status = 'queued', attempts = 0, deferrals = 0, run_after = ${dueNow}, last_error = null, finished_at = null, updated_at = now()
+      update job set status = 'queued', attempts = 0, deferrals = 0, run_after = now(), last_error = null, finished_at = null, updated_at = now()
       where id = ${target.id} and status = 'failed'
       returning id
     `);

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { BarcodeScanner } from "@/components/scanner";
 import { countConflictMessage, notFoundMessage } from "@/components/scanner/conflict-copy";
 import { parseWholeQty, qtyError, savedMessage, type StockKind } from "@/components/scanner/qty";
@@ -35,6 +35,10 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
   const settled = useRef<string | null>(null);
   const inflight = useRef<string | null>(null);
   const request = useRef(0);
+  const itemCard = useRef<HTMLElement>(null);
+  // One id per attempt (item, action, amount, reason, version). A retry after a lost response reuses it so the
+  // server de-duplicates; it is cleared once the server answers ok or conflict.
+  const attempt = useRef<{ key: string; id: string } | null>(null);
   const [notice, setNotice] = useState<Notice>({ status: "idle" });
   const [pending, setPending] = useState<Pending>(null);
   const [qty, setQty] = useState("1");
@@ -48,6 +52,12 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
 
   const item = notice.status === "found" ? notice.item : null;
   const busy = pending !== null;
+  const itemId = item?.id;
+
+  // On a small phone the viewfinder fills the screen, so bring the result into view after a lookup hit.
+  useEffect(() => {
+    if (itemId) itemCard.current?.scrollIntoView({ block: "start" });
+  }, [itemId]);
 
   function applyItem(code: string, next: ScanItem) {
     settled.current = code;
@@ -57,6 +67,7 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
     setConflict(null);
     setFormError(null);
     setSuccess(null);
+    attempt.current = null;
   }
 
   async function lookup(code: string, source: "camera" | "manual") {
@@ -75,7 +86,17 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
     setFormError(null);
     setSuccess(null);
     setConflict(null);
-    const result = await lookupScanCode(workspaceId, value);
+    let result: Awaited<ReturnType<typeof lookupScanCode>>;
+    try {
+      result = await lookupScanCode(workspaceId, value);
+    } catch {
+      if (inflight.current === value) inflight.current = null;
+      if (id !== request.current) return;
+      setPending(null);
+      settled.current = null;
+      setNotice({ status: "error", code: value, error: "Something went wrong. Try again." });
+      return;
+    }
     if (inflight.current === value) inflight.current = null;
     if (id !== request.current) return;
     setPending(null);
@@ -99,6 +120,7 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
     settled.current = null;
     inflight.current = null;
     setPending(null);
+    attempt.current = null;
     setNotice({ status: "idle" });
     setConflict(null);
     setFormError(null);
@@ -122,12 +144,19 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
     }
     setPending("create");
     setFormError(null);
-    const result = await createScannedItem(workspaceId, {
-      name: nextName,
-      sku: nextSku,
-      barcode: nextBarcode || null,
-    });
-    setPending(null);
+    let result: Awaited<ReturnType<typeof createScannedItem>>;
+    try {
+      result = await createScannedItem(workspaceId, {
+        name: nextName,
+        sku: nextSku,
+        barcode: nextBarcode || null,
+      });
+    } catch {
+      setFormError("Something went wrong. Try again.");
+      return;
+    } finally {
+      setPending(null);
+    }
     if (result.status === "found") {
       applyItem(notice.code, result.item);
       return;
@@ -151,18 +180,30 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
       setFormError("Add a reason for this adjustment.");
       return;
     }
+    const expectedVersion = kind === "count" ? (countVersion ?? item.version) : null;
+    const key = JSON.stringify([item.id, kind, amount, kind === "adjust" ? reason.trim() : null, expectedVersion]);
+    if (attempt.current?.key !== key) attempt.current = { key, id: crypto.randomUUID() };
+    const clientOpId = attempt.current.id;
     setPending(kind === "count" && countVersion !== undefined ? "keep" : kind);
     setFormError(null);
     setSuccess(null);
-    const result = await recordScanMovement(workspaceId, {
-      itemId: item.id,
-      kind,
-      qty: amount,
-      clientOpId: crypto.randomUUID(),
-      ...(kind === "adjust" ? { reason: reason.trim() } : {}),
-      ...(kind === "count" ? { expectedVersion: countVersion ?? item.version } : {}),
-    });
-    setPending(null);
+    let result: Awaited<ReturnType<typeof recordScanMovement>>;
+    try {
+      result = await recordScanMovement(workspaceId, {
+        itemId: item.id,
+        kind,
+        qty: amount,
+        clientOpId,
+        ...(kind === "adjust" ? { reason: reason.trim() } : {}),
+        ...(expectedVersion !== null ? { expectedVersion } : {}),
+      });
+    } catch {
+      setFormError("Something went wrong. Check the on-hand count, then try again.");
+      return;
+    } finally {
+      setPending(null);
+    }
+    if (result.status === "ok" || result.status === "conflict") attempt.current = null;
     if (result.status === "ok") {
       setNotice({ status: "found", code: notice.status === "found" ? notice.code : "", item: { ...item, onHand: result.onHand, version: result.version } });
       setConflict(null);
@@ -256,7 +297,7 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
           </div>
         )}
         {item && (
-          <section aria-labelledby="scanned-item" className="space-y-4 rounded-card border border-border bg-surface p-4">
+          <section ref={itemCard} aria-labelledby="scanned-item" className="scroll-mt-2 space-y-4 rounded-card border border-border bg-surface p-4">
             <div>
               <h2 id="scanned-item" className="font-display text-3xl font-semibold leading-tight">
                 {item.name}
@@ -288,7 +329,7 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
                 </div>
               </div>
             )}
-            <div className="sticky bottom-0 z-10 space-y-3 border-t border-border bg-surface py-3">
+            <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <button type="button" className={stepButton} aria-label="Decrease quantity" onClick={() => step(-1)} disabled={busy || archived}>
                   −
@@ -323,7 +364,8 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
                   placeholder="Damaged, found, or a correction"
                 />
               </label>
-              <div className="grid grid-cols-2 gap-2">
+            </div>
+              <div className="sticky bottom-0 z-10 -mx-4 grid grid-cols-2 gap-2 border-t border-border bg-surface px-4 py-3">
                 <button type="button" className={scanPrimary} disabled={busy || archived} onClick={() => void submit("receive")}>
                   {pending === "receive" ? "Saving…" : "Receive"}
                 </button>
@@ -340,7 +382,6 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
               <button type="button" className={scanSecondary} onClick={scanAnother} disabled={busy}>
                 Scan another
               </button>
-            </div>
           </section>
         )}
       </div>

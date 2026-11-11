@@ -39,6 +39,16 @@ export function useBarcodeScanner(onCode: (code: string) => void) {
     const onPageShow = (event: PageTransitionEvent) => {
       if (event.persisted) setAttempt((n) => n + 1);
     };
+    // Switching tabs or locking the phone hides the page without a pagehide: release the camera, then reopen on return.
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        stop();
+      } else if (stopped) {
+        setPhase("starting");
+        setAttempt((n) => n + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("pagehide", onPageHide);
     window.addEventListener("pageshow", onPageShow);
     void openCamera(
@@ -77,6 +87,7 @@ export function useBarcodeScanner(onCode: (code: string) => void) {
       },
     );
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("pageshow", onPageShow);
       stop();
