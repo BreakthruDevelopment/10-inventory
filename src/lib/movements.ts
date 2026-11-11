@@ -57,7 +57,7 @@ export async function recordMovement(actor: { id: string }, workspaceId: string,
 /** Newest stock activity in this workspace, for the dashboard. Members only; outsiders get 404. */
 export async function listRecentMovements(actor: { id: string }, workspaceId: string, limit = 20) {
   const member = await requireMember(actor, workspaceId, "staff");
-  const cap = Math.min(Math.max(1, limit), 50);
+  const cap = Number.isFinite(limit) ? Math.min(Math.max(1, Math.trunc(limit)), 50) : 20;
   const { item, stockMovement } = schema;
   const rows = await db()
     .select({

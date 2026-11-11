@@ -27,6 +27,8 @@ export function StockForm({
   const qtyRef = useRef<HTMLInputElement>(null);
   const reasonRef = useRef<HTMLInputElement>(null);
   const lastCount = useRef<{ qty: number; reason: string } | null>(null);
+  // One id per attempt: a retry after a lost response reuses it so the server de-duplicates. Cleared on ok/conflict.
+  const attempt = useRef<{ key: string; id: string } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -42,11 +44,14 @@ export function StockForm({
   async function send(input: { kind: Kind; qty: number; reason: string; expectedVersion?: number }) {
     setPending(true);
     setError(null);
+    const key = JSON.stringify([input.kind, input.qty, input.reason, input.expectedVersion ?? null]);
+    if (attempt.current?.key !== key) attempt.current = { key, id: crypto.randomUUID() };
+    const clientOpId = attempt.current.id;
     let result: Awaited<ReturnType<typeof recordStockAction>>;
     try {
       result = await recordStockAction(workspaceId, {
         itemId: item.id,
-        clientOpId: crypto.randomUUID(),
+        clientOpId,
         kind: input.kind,
         qty: input.qty,
         reason: input.reason,
@@ -58,6 +63,7 @@ export function StockForm({
       return;
     }
     setPending(false);
+    if (result.status === "ok" || result.status === "conflict") attempt.current = null;
     if (result.status === "ok") {
       setOnHand(result.onHand);
       setVersion(result.version);
@@ -71,6 +77,7 @@ export function StockForm({
       setVersion(result.conflict.current.version);
       setNotice(null);
       setConflict(result.conflict);
+      router.refresh();
       return;
     }
     setError(result.error);

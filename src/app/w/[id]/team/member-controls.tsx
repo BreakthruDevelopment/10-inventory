@@ -25,19 +25,29 @@ export function MemberControls({
   async function changeRole(role: "manager" | "staff") {
     setPending(true);
     setError(null);
-    const result = await changeRoleAction(workspaceId, member.userId, role);
-    setPending(false);
-    if (result.error) setError(result.error);
-    else router.refresh();
+    try {
+      const result = await changeRoleAction(workspaceId, member.userId, role);
+      if (result.error) setError(result.error);
+      else router.refresh();
+    } catch {
+      setError("Something went wrong. Try again.");
+    } finally {
+      setPending(false);
+    }
   }
 
   async function remove() {
     setPending(true);
     setError(null);
-    const result = await removeMemberAction(workspaceId, member.userId);
-    setPending(false);
-    if (result.error) setError(result.error);
-    else router.refresh();
+    try {
+      const result = await removeMemberAction(workspaceId, member.userId);
+      if (result.error) setError(result.error);
+      else router.refresh();
+    } catch {
+      setError("Something went wrong. Try again.");
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
