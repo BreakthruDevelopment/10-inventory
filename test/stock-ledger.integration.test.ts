@@ -232,6 +232,17 @@ describe.skipIf(!url)("stock ledger (Postgres)", () => {
     await expect(move(a.id, "count", 8, { clientOpId: countOp, expectedVersion: 2 })).rejects.toMatchObject({ code: "client_op_reused" });
   });
 
+  it("lists recent movements for members only, newest first", async () => {
+    const row = await create("RECENT");
+    await move(row.id, "receive", 4);
+    await move(row.id, "sale", 1);
+    const recent = await movements.listRecentMovements(staff, ws);
+    expect(recent.map((entry) => entry.kind)).toEqual(["sale", "receive"]);
+    expect(recent[0]).toMatchObject({ itemName: "RECENT", sku: "RECENT", delta: -1, onHandAfter: 3 });
+    expect(typeof recent[0].id).toBe("string");
+    await expect(movements.listRecentMovements(outsider, ws)).rejects.toMatchObject({ status: 404 });
+  });
+
   it("does not deadlock a movement against a workspace delete", async () => {
     const { createWorkspace } = await import("@/lib/workspaces");
     for (let i = 0; i < 15; i++) {
