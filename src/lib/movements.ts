@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "@/lib/db";
 import { ClientOpReusedError, ConflictError, NotFoundError } from "@/lib/errors";
@@ -52,4 +52,29 @@ export async function recordMovement(actor: { id: string }, workspaceId: string,
     }).returning();
     return movementView(movement);
   }));
+}
+
+/** Newest stock activity in this workspace, for the dashboard. Members only; outsiders get 404. */
+export async function listRecentMovements(actor: { id: string }, workspaceId: string, limit = 20) {
+  const member = await requireMember(actor, workspaceId, "staff");
+  const cap = Math.min(Math.max(1, limit), 50);
+  const { item, stockMovement } = schema;
+  const rows = await db()
+    .select({
+      id: stockMovement.id,
+      itemId: stockMovement.itemId,
+      itemName: item.name,
+      sku: item.sku,
+      kind: stockMovement.kind,
+      delta: stockMovement.delta,
+      onHandAfter: stockMovement.onHandAfter,
+      reason: stockMovement.reason,
+      createdAt: stockMovement.createdAt,
+    })
+    .from(stockMovement)
+    .innerJoin(item, and(eq(item.id, stockMovement.itemId), eq(item.workspaceId, stockMovement.workspaceId)))
+    .where(eq(stockMovement.workspaceId, member.workspaceId))
+    .orderBy(desc(stockMovement.id))
+    .limit(cap);
+  return rows.map((row) => ({ ...row, id: row.id.toString() }));
 }

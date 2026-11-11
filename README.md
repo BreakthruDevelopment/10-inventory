@@ -8,7 +8,9 @@ image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
 
 **Inventory Management** (app 10): stock counts that stay right without a scanner budget. Staff scan or search
 items on the phone they already carry, receive deliveries, record sales and do counts; managers see what is about
-to run out and why. The data/API layer includes team access, items, barcode/SKU lookup, stock history and CSV downloads. Stock screens, scanning and forecasts follow in separate issues.
+to run out and why. Workspaces, the stock dashboard, item pages (including a conflict dialog when a count is stale
+or a sale would go negative), the forecast with its plain-language explanation, and team invite links are in the app.
+The dashboard links to the scan screen for the phone camera.
 
 **Tenancy.** Stock belongs to a team, not a person. Every inventory row carries `workspace_id`, and the only way
 in is a `membership` row (`manager` or `staff`). Every data function takes the acting user and the workspace id
