@@ -1,7 +1,7 @@
 import "server-only";
 import { and, count, desc, eq, gt, ilike, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { barcodeInput } from "@/lib/barcodes";
+import { barcodeInput, lookupCodeInput } from "@/lib/barcodes";
 import { db, schema } from "@/lib/db";
 import { ITEM_UNITS, type StockMovement } from "@/lib/db/schema";
 import { ConflictError, NotFoundError, StockConflictError } from "@/lib/errors";
@@ -139,8 +139,9 @@ export async function archiveItem(actor: { id: string }, workspaceId: string, it
 
 export async function lookupItem(actor: { id: string }, workspaceId: string, code: unknown) {
   const member = await requireMember(actor, workspaceId);
-  // A code may be a SKU or a barcode: look up by the SKU rules, not the GTIN check (barcodes were validated on create).
-  const value = fields.sku.parse(code);
+  // A code may be a SKU (up to 40) or a barcode (up to 64, Code 128 and QR): accept the longer of the two. No GTIN check
+  // here: barcodes were validated on create, and a SKU may look like a GTIN without being one.
+  const value = lookupCodeInput.parse(code);
   const rows = await db().select().from(item).where(and(eq(item.workspaceId, member.workspaceId), isNull(item.archivedAt), or(eq(item.barcode, value), eq(item.sku, value)))).limit(2);
   if (!rows.length) throw new NotFoundError("Not in this workspace");
   // A SKU may equal another item's barcode. Never silently record stock against the wrong item.

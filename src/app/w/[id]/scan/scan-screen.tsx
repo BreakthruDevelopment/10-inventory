@@ -7,7 +7,7 @@ import { countConflictMessage, notFoundMessage } from "../items/conflict-copy";
 import { parseWholeQty, qtyError, savedMessage, type StockKind } from "@/components/scanner/qty";
 import { scanPrimary, scanSecondary, stepButton } from "@/components/scanner/styles";
 import { inputClass, labelClass } from "@/components/ui/styles";
-import { barcodeInput } from "@/lib/barcodes";
+import { LOOKUP_CODE_MAX, barcodeInput } from "@/lib/barcodes";
 import { createScannedItem, lookupScanCode, recordScanMovement } from "./actions";
 import type { MovementConflict, ScanItem } from "./scan-types";
 
@@ -74,9 +74,9 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
     const value = code.trim();
     if (!value) return;
     if (source === "camera" && (settled.current === value || inflight.current === value)) return;
-    if (value.length > 40) {
+    if (value.length > LOOKUP_CODE_MAX) {
       settled.current = value;
-      setNotice({ status: "error", code: value, error: "Use a code of 1–40 characters." });
+      setNotice({ status: "error", code: value, error: "Use a code of 1–64 characters." });
       setFormError(null);
       return;
     }
@@ -107,7 +107,7 @@ export function ScanScreen({ workspaceId, workspaceName, canCreate }: { workspac
     settled.current = value;
     if (result.status === "missing") {
       setNotice({ status: "missing", code: value });
-      setSku(value.slice(0, 40));
+      setSku(value.length <= 40 ? value : ""); // a SKU is at most 40; a longer code is a barcode only
       setBarcode(barcodeOrNull(value) ?? "");
       setName("");
       return;

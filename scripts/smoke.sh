@@ -234,4 +234,9 @@ expect "admin stats for a user" 403 "$(status "$JAR_A" GET /api/admin/stats)"
 expect "admin stats for nobody" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/admin/stats")"
 pass "admin counts are admin-only"
 
+longcode="LONGBARCODE-$(printf 'X%.0s' $(seq 1 50))"
+longitem=$(send "$JAR_A" POST "/api/w/$ws/items" "{\"sku\":\"SMOKE-LONG\",\"name\":\"Smoke long barcode\",\"barcode\":\"$longcode\"}" | field item.id)
+expect "lookup of a 62-character barcode" "$longitem" "$(send "$JAR_A" GET "/api/w/$ws/lookup?code=$longcode" | field item.id)"
+pass "a barcode longer than 40 characters can be looked up"
+
 echo "SMOKE PASS"

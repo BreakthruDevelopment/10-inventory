@@ -211,6 +211,16 @@ describe.skipIf(!url)("stock ledger (Postgres)", () => {
     expect((await items.lookupItem(staff, ws, "OAT MILK")).id).toBe(b.id);
   });
 
+  it("looks up a barcode of 41 to 64 characters, and refuses a code over 64 or empty", async () => {
+    const long = "B".repeat(64), mid = "C".repeat(41);
+    const a = await create("LONGBC-A", { barcode: long }); const b = await create("LONGBC-B", { barcode: mid });
+    expect((await items.lookupItem(staff, ws, long)).id).toBe(a.id);
+    expect((await items.lookupItem(staff, ws, ` ${mid} `)).id).toBe(b.id);
+    await expect(items.lookupItem(staff, ws, "B".repeat(65))).rejects.toMatchObject({ name: "ZodError" });
+    await expect(items.lookupItem(staff, ws, "  ")).rejects.toMatchObject({ name: "ZodError" });
+    for (const actor of [outsider, admin]) await expect(items.lookupItem(actor, ws, long)).rejects.toMatchObject({ status: 404 });
+  });
+
   it("rejects an item edit with no fields without bumping the version", async () => {
     const row = await create();
     await expect(items.editItem(manager, ws, row.id, { version: 1 })).rejects.toMatchObject({ name: "ZodError" });
